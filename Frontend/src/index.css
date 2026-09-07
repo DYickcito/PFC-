@@ -1,0 +1,95 @@
+/* ===================================================================
+   index.css — Estilos globales de la aplicación RAG Institucional
+   =================================================================== */
+
+/* ---------- Variables de color (light) ---------- */
+:root {
+  --bg:           #f9fafb;
+  --bg-card:      #ffffff;
+  --bg-sidebar:   #ffffff;
+  --border:       #e5e7eb;
+  --text:         #6b7280;
+  --text-h:       #111827;
+  --text-muted:   #9ca3af;
+  --accent:       #7c3aed;
+  --accent-light: #ede9fe;
+  --accent-hover: #6d28d9;
+  --success:      #059669;
+  --success-bg:   #ecfdf5;
+  --warning:      #d97706;
+  --warning-bg:   #fffbeb;
+  --danger:       #dc2626;
+  --danger-bg:    #fef2f2;
+  --nav-bg:       #ffffff;
+  --nav-border:   #e5e7eb;
+  --shadow-sm:    0 1px 2px rgba(0,0,0,.06);
+  --shadow:       0 4px 12px rgba(0,0,0,.08);
+  --radius:       8px;
+  --radius-lg:    12px;
+
+  font: 14px/1.5 system-ui, 'Segoe UI', Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  color-scheme: light dark;
+}
+
+/* ---------- Variables de color (dark) ---------- */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:           #0f1117;
+    --bg-card:      #1a1d27;
+    --bg-sidebar:   #1a1d27;
+    --border:       #2d3148;
+    --text:         #9ca3af;
+    --text-h:       #f3f4f6;
+    --text-muted:   #6b7280;
+    --accent:       #a78bfa;
+    --accent-light: rgba(167,139,250,.15);
+    --accent-hover: #8b5cf6;
+    --success:      #34d399;
+    --success-bg:   rgba(52,211,153,.1);
+    --warning:      #fbbf24;
+    --warning-bg:   rgba(251,191,36,.1);
+    --danger:       #f87171;
+    --danger-bg:    rgba(248,113,113,.1);
+    --nav-bg:       #1a1d27;
+    --nav-border:   #2d3148;
+  }
+}
+
+/* ---------- Reset ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  background: var(--bg);
+}
+
+#root {
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+}
+
+h1, h2, h3, h4 {
+  margin: 0;
+  color: var(--text-h);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+p { margin: 0; }
+
+button {
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font: inherit;
+}
+
+input, select, textarea {
+  font: inherit;
+  outline: none;
+}

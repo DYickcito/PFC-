@@ -1,0 +1,6 @@
+@echo off
+echo Activando entorno virtual...
+call venv\Scripts\activate
+
+echo Iniciando servidor FastAPI en http://localhost:8000 ...
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

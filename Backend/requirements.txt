@@ -1,0 +1,33 @@
+# =================================================================
+# Backend - Módulo RAG Institucional
+# Python: 3.12.x
+# LlamaIndex: pip resuelve automáticamente versiones compatibles
+# =================================================================
+
+# ===== Core Framework =====
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# ===== Pydantic / Settings =====
+pydantic-settings==2.4.0
+
+# ===== Supabase / Auth =====
+supabase==2.7.4
+python-jose[cryptography]==3.3.0
+
+# ===== LlamaIndex (Orquestador RAG) =====
+# Sin versiones fijas — pip resuelve el set compatible automáticamente
+llama-index-core
+llama-index-embeddings-gemini
+llama-index-llms-groq
+llama-index-vector-stores-qdrant
+
+# ===== File Parsing =====
+python-multipart==0.0.9
+pypdf==4.3.1
+python-docx==1.1.2
+openpyxl==3.1.5
+
+# ===== Utilities =====
+python-dotenv==1.0.1
+aiofiles==24.1.0

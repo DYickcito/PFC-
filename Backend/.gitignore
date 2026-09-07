@@ -1,0 +1,15 @@
+# Entorno virtual
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Variables de entorno (NUNCA subir al repositorio)
+.env
+
+# Archivos subidos por usuarios
+uploads/
+
+# IDEs
+.vscode/
+.idea/

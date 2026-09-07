@@ -1,0 +1,67 @@
+api key.txt
+*.key
+*.pem
+*.cert
+
+.env
+.env.*
+!.env.example
+
+venv/
+env/
+ENV/
+.venv/
+
+# Bytecode y compilados
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Tests & Cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Archivos cargados por usuarios en el sistema RAG
+Backend/uploads/*
+!Backend/uploads/.gitkeep
+uploads/
+
+node_modules/
+Frontend/node_modules/
+
+# Compilados de producción
+dist/
+dist-ssr/
+Frontend/dist/
+
+# Cache de Vite
+.vite/
+Frontend/.vite/
+
+# Logs de gestores de paquetes
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+*.iws
+*.iml
