@@ -28,8 +28,12 @@ class Settings(BaseSettings):
     gemini_api_key: str
     # Dimensión de vectores del modelo gemini-embedding-2
     embedding_dim: int = 3072
-    # IDs de modelo disponibles en Groq
-    available_llm_models: List[str] = ["qwen/qwen3-27b", "openai/gpt-oss-20b"]
+
+    # --- Enrutamiento por similitud ---
+    # Puntaje coseno mínimo para usar un fragmento como contexto.
+    # Si ningún fragmento lo alcanza, se responde con conocimiento general.
+    # Se calibra con las pruebas (el chat devuelve max_score de cada consulta).
+    similarity_threshold: float = 0.6
 
     # --- Groq LLM ---
     groq_api_key: str
