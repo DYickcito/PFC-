@@ -6,6 +6,9 @@
  * Columna izquierda: formulario de carga (drag & drop + selector de carrera)
  * Columna derecha:   historial de documentos subidos con búsqueda y filtros
  * Pie de página:     contadores de estado (indexados / en proceso / con error)
+ *
+ * La indexación corre en segundo plano en el backend: al subir un archivo
+ * se recibe su document_id y se consulta su estado cada pocos segundos.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -20,7 +23,9 @@ import {
   X,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
-import { uploadDocument } from "../services/api";
+import { uploadDocument, getIngestStatus, getIngestJobs } from "../services/api";
+
+const POLL_MS = 4000;
 
 /* ── Extensiones aceptadas ── */
 const ACCEPTED_EXTS = [".pdf", ".docx", ".txt", ".xlsx", ".csv"];
@@ -31,6 +36,9 @@ const ACCEPTED_MIME = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "text/csv",
 ];
+
+/* ── Color de cada tipo de mensaje (variables de index.css) ── */
+const ALERT_COLOR = { success: "success", info: "warning", error: "danger" };
 
 /* ── Utilidades ── */
 function extLabel(filename = "") {
@@ -75,6 +83,10 @@ export default function IngestPage() {
   const [filterCarrera, setFilterCarrera] = useState("all");
   const [loadingDocs, setLoadingDocs] = useState(false);
 
+  /* ── Estado de indexaciones en segundo plano ── */
+  const [pending, setPending] = useState([]); // [{ id, nombre }]
+  const [jobsSummary, setJobsSummary] = useState({ procesando: 0, errores: 0 });
+
   /* ── Cargar carreras desde Supabase ── */
   useEffect(() => {
     supabase
@@ -106,6 +118,45 @@ export default function IngestPage() {
 
   useEffect(() => { fetchDocumentos(); }, [fetchDocumentos]);
 
+  /* ── Contadores de indexación (backend) ── */
+  const fetchJobs = useCallback(async () => {
+    try {
+      const { data } = await getIngestJobs();
+      setJobsSummary({ procesando: data.procesando ?? 0, errores: data.errores ?? 0 });
+    } catch {
+      /* si falla, se mantienen los últimos valores */
+    }
+  }, []);
+
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
+  /* ── Seguimiento de documentos que se están indexando ── */
+  useEffect(() => {
+    if (pending.length === 0) return undefined;
+    const timer = setInterval(async () => {
+      for (const job of pending) {
+        try {
+          const { data } = await getIngestStatus(job.id);
+          if (data.estado === "procesando") continue;
+          setPending((prev) => prev.filter((p) => p.id !== job.id));
+          if (data.estado === "indexado") {
+            setUploadMsg({
+              type: "success",
+              text: `✅ "${job.nombre}" indexado: ${data.nodes_indexed} fragmentos en ${data.duracion_s} s.`,
+            });
+          } else {
+            setUploadMsg({ type: "error", text: `No se pudo indexar "${job.nombre}": ${data.error}` });
+          }
+          fetchDocumentos();
+          fetchJobs();
+        } catch {
+          /* se reintenta en el siguiente ciclo */
+        }
+      }
+    }, POLL_MS);
+    return () => clearInterval(timer);
+  }, [pending, fetchDocumentos, fetchJobs]);
+
   /* ── Manejo de archivo ── */
   function handleFileSelect(f) {
     if (!f) return;
@@ -131,9 +182,9 @@ export default function IngestPage() {
   /* ── Submit del formulario ── */
   async function handleUpload(e) {
     e.preventDefault();
-    if (!file) { setUploadMsg({ type: "error", text: "Seleccioná un archivo primero." }); return; }
-    if (!selectedCarrera) { setUploadMsg({ type: "error", text: "Seleccioná una carrera." }); return; }
-    if (!nombre.trim()) { setUploadMsg({ type: "error", text: "Ingresá un nombre para el documento." }); return; }
+    if (!file) { setUploadMsg({ type: "error", text: "Selecciona un archivo primero." }); return; }
+    if (!selectedCarrera) { setUploadMsg({ type: "error", text: "Selecciona una carrera." }); return; }
+    if (!nombre.trim()) { setUploadMsg({ type: "error", text: "Ingresa un nombre para el documento." }); return; }
 
     setUploading(true);
     setUploadMsg(null);
@@ -146,14 +197,16 @@ export default function IngestPage() {
 
     try {
       const res = await uploadDocument(fd);
+      setPending((prev) => [...prev, { id: res.data.document_id, nombre: res.data.nombre_documento }]);
       setUploadMsg({
-        type: "success",
-        text: `✅ "${res.data.nombre_documento}" indexado — ${res.data.nodes_indexed} chunks.`,
+        type: "info",
+        text: `"${res.data.nombre_documento}" recibido. Se está indexando en segundo plano; puedes seguir usando el sistema.`,
       });
       setFile(null);
       setNombre("");
       setDescripcion("");
       fetchDocumentos();
+      fetchJobs();
     } catch (err) {
       const detail = err.response?.data?.detail ?? err.message;
       setUploadMsg({ type: "error", text: `Error: ${detail}` });
@@ -282,12 +335,12 @@ export default function IngestPage() {
                   <FileUp size={28} color="var(--accent)" />
                 </div>
                 <p style={{ fontWeight: 600, color: "var(--text-h)", margin: "8px 0 4px", fontSize: 14 }}>
-                  Arrastrá y soltá tu documento
+                  Arrastra y suelta tu documento
                 </p>
                 <p style={{ fontSize: 13, color: "var(--text)" }}>
                   o{" "}
                   <span style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>
-                    hacé clic para seleccionar
+                    haz clic para seleccionar
                   </span>
                 </p>
                 <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
@@ -301,9 +354,9 @@ export default function IngestPage() {
           {uploadMsg && (
             <div style={{
               ...styles.alert,
-              background: uploadMsg.type === "success" ? "var(--success-bg)" : "var(--danger-bg)",
-              color: uploadMsg.type === "success" ? "var(--success)" : "var(--danger)",
-              border: `1px solid ${uploadMsg.type === "success" ? "var(--success)" : "var(--danger)"}`,
+              background: `var(--${ALERT_COLOR[uploadMsg.type]}-bg)`,
+              color: `var(--${ALERT_COLOR[uploadMsg.type]})`,
+              border: `1px solid var(--${ALERT_COLOR[uploadMsg.type]})`,
             }}>
               {uploadMsg.text}
             </div>
@@ -317,7 +370,7 @@ export default function IngestPage() {
           >
             {uploading ? (
               <>
-                <span style={styles.spinner} /> Indexando...
+                <span style={styles.spinner} /> Subiendo...
               </>
             ) : (
               <>
@@ -334,11 +387,11 @@ export default function IngestPage() {
             <span style={{ fontSize: 12, color: "var(--success)" }}>Documentos indexados</span>
           </div>
           <div style={{ ...styles.counterCard, borderColor: "var(--warning)", background: "var(--warning-bg)" }}>
-            <span style={{ ...styles.counterNum, color: "var(--warning)" }}>{uploading ? 1 : 0}</span>
+            <span style={{ ...styles.counterNum, color: "var(--warning)" }}>{jobsSummary.procesando}</span>
             <span style={{ fontSize: 12, color: "var(--warning)" }}>En proceso</span>
           </div>
           <div style={{ ...styles.counterCard, borderColor: "var(--danger)", background: "var(--danger-bg)" }}>
-            <span style={{ ...styles.counterNum, color: "var(--danger)" }}>0</span>
+            <span style={{ ...styles.counterNum, color: "var(--danger)" }}>{jobsSummary.errores}</span>
             <span style={{ fontSize: 12, color: "var(--danger)" }}>Con errores</span>
           </div>
         </div>

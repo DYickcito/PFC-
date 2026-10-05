@@ -51,15 +51,23 @@ apiClient.interceptors.response.use(
 /**
  * Enviar consulta RAG al backend.
  * @param {string} prompt - Pregunta del usuario
- * @param {string} modelName - Modelo LLM seleccionado (qwen/qwen3-27b u openai/gpt-oss-20b)
+ * @param {string} modelName - ID del modelo LLM (lista en GET /api/v1/chat/models)
  * @param {number} similarityTopK - Número de fragmentos a recuperar (default 5)
  */
 export const sendChatQuery = (prompt, modelName, similarityTopK = 5) =>
   apiClient.post("/api/v1/chat/query", {
     prompt,
-    model_name: modelName,
+    // Si no hay modelo elegido, el backend usa su modelo por defecto
+    ...(modelName ? { model_name: modelName } : {}),
     similarity_top_k: similarityTopK,
   });
+
+/**
+ * Historial de consultas del usuario autenticado.
+ * @param {number} limit - Cantidad máxima de consultas a traer
+ */
+export const getChatHistory = (limit = 20) =>
+  apiClient.get("/api/v1/chat/history", { params: { limit } });
 
 /**
  * Obtener modelos LLM disponibles del backend.
@@ -76,5 +84,18 @@ export const uploadDocument = (formData) =>
   apiClient.post("/api/v1/ingest/upload", formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
+
+/**
+ * Estado de indexación de un documento (procesando / indexado / error).
+ * @param {string} documentId - ID devuelto por uploadDocument
+ */
+export const getIngestStatus = (documentId) =>
+  apiClient.get(`/api/v1/ingest/status/${documentId}`);
+
+/**
+ * Resumen de indexaciones del servidor (contadores del panel).
+ */
+export const getIngestJobs = () =>
+  apiClient.get("/api/v1/ingest/jobs");
 
 export default apiClient;
