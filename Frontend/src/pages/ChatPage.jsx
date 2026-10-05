@@ -9,11 +9,13 @@
  *  - Input con envío por Enter o botón
  *  - Renderizado de Markdown en las respuestas
  *  - Panel de fuentes citadas en cada respuesta
+ *  - Indicador de origen: documentos oficiales o conocimiento general
+ *    (según el enrutamiento por puntaje de similitud del backend)
  */
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles } from "lucide-react";
+import { Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info } from "lucide-react";
 import { sendChatQuery, getAvailableModels } from "../services/api";
 
 /* ── Mensaje de bienvenida ── */
@@ -21,7 +23,7 @@ const WELCOME = {
   id: "welcome",
   role: "assistant",
   content:
-    "¡Hola! Soy la **IA Institucional**. Podés consultarme sobre los documentos académicos indexados en el sistema. ¿En qué te puedo ayudar?",
+    "¡Hola! Soy la **IA Institucional**. Puedes consultarme sobre los documentos académicos indexados en el sistema. ¿En qué te puedo ayudar?",
   sources: [],
 };
 
@@ -30,7 +32,7 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState("qwen/qwen3-27b");
+  const [selectedModel, setSelectedModel] = useState("");
   const [expandedSources, setExpandedSources] = useState({});
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
@@ -39,13 +41,13 @@ export default function ChatPage() {
   useEffect(() => {
     getAvailableModels()
       .then((res) => {
-        setModels(res.data.models ?? []);
+        const list = res.data.models ?? [];
+        setModels(list);
+        setSelectedModel(res.data.default ?? list[0]?.id ?? "");
       })
       .catch(() => {
-        setModels([
-          { id: "qwen/qwen3-27b", label: "Qwen 3 27B (Groq)" },
-          { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B (Groq)" },
-        ]);
+        // Sin lista de modelos el backend usa su modelo por defecto
+        setModels([]);
       });
   }, []);
 
@@ -73,6 +75,9 @@ export default function ChatPage() {
         content: data.response,
         sources: data.sources ?? [],
         model: data.model_used,
+        usoContexto: data.uso_contexto,
+        maxScore: data.max_score,
+        tiempoMs: data.tiempo_ms,
       };
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
@@ -128,8 +133,9 @@ export default function ChatPage() {
             style={styles.modelSelect}
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
-            disabled={loading}
+            disabled={loading || models.length === 0}
           >
+            {models.length === 0 && <option value="">Modelo por defecto</option>}
             {models.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
             ))}
@@ -170,7 +176,7 @@ export default function ChatPage() {
             ref={inputRef}
             style={styles.textarea}
             rows={1}
-            placeholder="Escribí tu consulta... (Enter para enviar)"
+            placeholder="Escribe tu consulta... (Enter para enviar)"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -232,10 +238,23 @@ function MessageBubble({ msg, expanded, onToggleSources }) {
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
         </div>
 
-        {/* Modelo usado */}
+        {/* Origen de la respuesta */}
+        {msg.usoContexto === true && (
+          <p style={{ ...styles.originTag, ...styles.originDocs }}>
+            <ShieldCheck size={11} /> Basada en documentos oficiales
+          </p>
+        )}
+        {msg.usoContexto === false && (
+          <p style={{ ...styles.originTag, ...styles.originGeneral }}>
+            <Info size={11} /> Sin información en los documentos cargados
+          </p>
+        )}
+
+        {/* Modelo usado y tiempo */}
         {msg.model && (
           <p style={styles.modelLabel}>
             <Sparkles size={10} /> {msg.model}
+            {msg.tiempoMs != null && ` · ${(msg.tiempoMs / 1000).toFixed(1)} s`}
           </p>
         )}
 
@@ -423,6 +442,28 @@ const styles = {
     color: "var(--text-muted)",
     marginTop: 5,
     marginLeft: 4,
+  },
+
+  /* Origen de la respuesta */
+  originTag: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    fontSize: 10,
+    fontWeight: 600,
+    borderRadius: 4,
+    padding: "2px 7px",
+    marginTop: 6,
+    marginLeft: 4,
+    marginRight: 6,
+  },
+  originDocs: {
+    color: "var(--success)",
+    background: "var(--success-bg)",
+  },
+  originGeneral: {
+    color: "var(--warning)",
+    background: "var(--warning-bg)",
   },
 
   /* Fuentes */
