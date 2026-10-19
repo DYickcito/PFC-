@@ -13,6 +13,7 @@ import asyncio
 import csv
 import logging
 import re
+import time
 import unicodedata
 from collections import Counter
 from pathlib import Path
@@ -82,19 +83,26 @@ QA_PROMPT = PromptTemplate(
 
 FALLBACK_PROMPT = (
     "Eres el asistente académico de la carrera de Diseño y Desarrollo de "
-    "Software de Tecsup. Los documentos académicos cargados en el sistema no "
-    "tienen información sobre la pregunta del estudiante. Responde en español "
-    "siguiendo estas reglas:\n"
-    "1. Empieza con una sola frase breve y amable, con tus propias palabras, que "
-    "diga que la pregunta no está relacionada con la información académica de la "
-    "carrera que manejas. Por ejemplo: \"Tu pregunta no tiene relación con la "
-    "información académica que manejo, pero te cuento lo que sé:\". No repitas "
-    "siempre la misma frase.\n"
-    "2. Si es una pregunta general (cultura general, programación, conceptos), "
+    "Software de Tecsup. Respondes consultas a partir de estos documentos "
+    "cargados en el sistema:\n"
+    "{catalogo}\n\n"
+    "Para la pregunta del estudiante no se encontraron fragmentos relevantes en "
+    "esos documentos. Responde en español siguiendo estas reglas:\n"
+    "1. Si el estudiante saluda, pregunta qué datos tienes, qué sabes o qué puedes "
+    "hacer, preséntate en una o dos frases, explica qué temas puedes responder "
+    "según la lista de documentos y da dos o tres ejemplos de preguntas que puede "
+    "hacerte. En este caso no digas que la pregunta está fuera de tu información.\n"
+    "2. En cualquier otro caso, empieza con una sola frase breve y amable, con tus "
+    "propias palabras, que diga que la pregunta no está relacionada con la "
+    "información académica que manejas. Por ejemplo: \"Tu pregunta no tiene "
+    "relación con la información académica que manejo, pero te cuento lo que "
+    "sé:\". No repitas siempre la misma frase.\n"
+    "3. Si es una pregunta general (cultura general, programación, conceptos), "
     "respóndela de forma breve con tu conocimiento general.\n"
-    "3. Si pide datos propios de Tecsup o de otra institución (horarios, docentes, "
-    "costos, trámites, servicios, fechas), no inventes nada: di que no tienes esa "
-    "información y recomienda consultarla con la coordinación de la carrera.\n\n"
+    "4. Si pide datos propios de Tecsup o de otra institución (horarios, docentes, "
+    "costos, trámites, servicios, fechas) que no aparecen en la lista de "
+    "documentos, no inventes nada: di que no tienes esa información y recomienda "
+    "consultarla con la coordinación de la carrera.\n\n"
     "Pregunta: {query}\n"
     "Respuesta:"
 )
@@ -382,6 +390,50 @@ def route_by_similarity(nodes: List[NodeWithScore], threshold: float):
 # ─────────────────────────────────────────────
 # Consulta RAG
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# Catálogo de documentos cargados (para saludos y preguntas sobre el asistente)
+# ─────────────────────────────────────────────
+_CATALOGO_TTL_SEC = 60
+_catalogo_cache = {"momento": 0.0, "texto": ""}
+
+
+def catalogo_documentos() -> str:
+    """
+    Lista de documentos registrados en Supabase (nombre, tipo, carrera y
+    descripción), en texto para el prompt. Se guarda 60 segundos en memoria
+    para no consultar Supabase en cada pregunta. Si la consulta falla, se usa
+    el último valor conocido.
+    """
+    ahora = time.monotonic()
+    if _catalogo_cache["texto"] and ahora - _catalogo_cache["momento"] < _CATALOGO_TTL_SEC:
+        return _catalogo_cache["texto"]
+    try:
+        from app.db.supabase_client import get_supabase_client
+
+        filas = (
+            get_supabase_client()
+            .table("documento")
+            .select("nombre_documento, descripcion, tipo_documento ( nombre_tipo ), carrera ( nombre_carrera )")
+            .order("fecha_carga", desc=True)
+            .limit(50)
+            .execute()
+        ).data or []
+        lineas = []
+        for f in filas:
+            tipo = (f.get("tipo_documento") or {}).get("nombre_tipo", "")
+            carrera = (f.get("carrera") or {}).get("nombre_carrera", "")
+            linea = f"- {f.get('nombre_documento', 'Documento')} ({tipo}, {carrera})"
+            if f.get("descripcion"):
+                linea += f": {f['descripcion']}"
+            lineas.append(linea)
+        texto = "\n".join(lineas) if lineas else "- (todavía no hay documentos cargados)"
+        _catalogo_cache.update(momento=ahora, texto=texto)
+        return texto
+    except Exception as e:
+        logger.warning(f"⚠️ No se pudo leer el catálogo de documentos: {e}")
+        return _catalogo_cache["texto"] or "- (no se pudo obtener la lista de documentos)"
+
+
 def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
     """Parte bloqueante de la consulta; se ejecuta en un hilo aparte."""
     llm = _build_groq_llm(model_name)
@@ -418,7 +470,9 @@ def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
     # 3b. Sin contexto suficiente: el modelo avisa con sus palabras que la
     #     pregunta está fuera de los documentos y responde con conocimiento
     #     general. La interfaz además lo marca con uso_contexto=False.
-    completion = llm.complete(FALLBACK_PROMPT.format(query=prompt))
+    completion = llm.complete(
+        FALLBACK_PROMPT.format(catalogo=catalogo_documentos(), query=prompt)
+    )
     return {
         "response": completion.text.strip(),
         "sources": [],
