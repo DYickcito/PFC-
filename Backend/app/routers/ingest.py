@@ -10,12 +10,17 @@ Endpoints:
       (extracción, limpieza, chunking, embeddings Gemini → Qdrant)
 
   GET /api/v1/ingest/status/{document_id}
-    - Estado de la indexación de un documento: procesando / indexado / error
+    - Estado de la indexación de un documento: en_cola / procesando / indexado / error
 
   GET /api/v1/ingest/jobs
     - Estado de las indexaciones desde que se inició el servidor
       (alimenta los contadores "En proceso" y "Con errores" del panel)
+
+Se pueden subir varios documentos seguidos: cada uno entra a una cola y se
+indexa de a uno, para no superar el límite de solicitudes de la capa gratuita
+de Gemini (varias indexaciones en paralelo multiplicarían las llamadas).
 """
+import asyncio
 import logging
 import time
 import uuid
@@ -57,15 +62,26 @@ ALLOWED_MIME = {
 # ─────────────────────────────────────────────
 INGEST_JOBS: dict[str, dict] = {}
 
+# Solo una indexación a la vez; las demás esperan su turno en estado "en_cola".
+_INGEST_LOCK = asyncio.Lock()
+
 
 async def _run_ingest(file_path: Path, documento_id: str, document_metadata: dict) -> None:
+    """Tarea en segundo plano: espera su turno en la cola y luego indexa el documento."""
+    job = INGEST_JOBS[documento_id]
+    async with _INGEST_LOCK:
+        job["estado"] = "procesando"
+        await _index_document(job, file_path, documento_id, document_metadata)
+
+
+async def _index_document(job: dict, file_path: Path, documento_id: str, document_metadata: dict) -> None:
     """
-    Tarea en segundo plano: indexa el documento y actualiza su estado.
+    Indexa el documento y actualiza su estado.
     Si la indexación falla, se eliminan el registro en Supabase, los vectores
     parciales en Qdrant y el archivo, para que el historial no muestre como
     indexado un documento que no se puede consultar.
+    duracion_s mide solo la indexación, sin el tiempo de espera en la cola.
     """
-    job = INGEST_JOBS[documento_id]
     start = time.perf_counter()
     try:
         nodes_indexed = await ingest_document(
@@ -175,7 +191,7 @@ async def upload_document(
     INGEST_JOBS[documento_id] = {
         "document_id": documento_id,
         "nombre_documento": nombre_documento,
-        "estado": "procesando",
+        "estado": "en_cola",
         "nodes_indexed": None,
         "error": None,
         "duracion_s": None,
@@ -188,10 +204,10 @@ async def upload_document(
     background_tasks.add_task(_run_ingest, file_path, documento_id, document_metadata)
 
     return {
-        "message": "Documento recibido. La indexación continúa en segundo plano.",
+        "message": "Documento recibido. Queda en cola para indexarse en segundo plano.",
         "document_id": documento_id,
         "nombre_documento": nombre_documento,
-        "estado": "procesando",
+        "estado": "en_cola",
     }
 
 
@@ -212,6 +228,7 @@ async def list_ingest_jobs(current_user: dict = Depends(require_admin)):
     """Lista las indexaciones registradas desde que se inició el servidor."""
     jobs = list(INGEST_JOBS.values())
     return {
+        "en_cola": sum(j["estado"] == "en_cola" for j in jobs),
         "procesando": sum(j["estado"] == "procesando" for j in jobs),
         "errores": sum(j["estado"] == "error" for j in jobs),
         "jobs": jobs,

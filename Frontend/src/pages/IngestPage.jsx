@@ -7,8 +7,9 @@
  * Columna derecha:   historial de documentos subidos con búsqueda y filtros
  * Pie de página:     contadores de estado (indexados / en proceso / con error)
  *
- * La indexación corre en segundo plano en el backend: al subir un archivo
- * se recibe su document_id y se consulta su estado cada pocos segundos.
+ * Se pueden seleccionar varios archivos a la vez. Cada uno se sube por separado
+ * y el backend los indexa de a uno, en segundo plano; aquí se consulta el estado
+ * de cada documento cada pocos segundos y se muestra en la cola de indexación.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
@@ -36,6 +37,31 @@ const ACCEPTED_MIME = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "text/csv",
 ];
+
+const MAX_MB = 50;
+
+/* ── Estados de indexación que devuelve el backend ── */
+const JOB_LABEL = {
+  en_cola: { label: "En cola", color: "var(--text-muted)", bg: "var(--bg)" },
+  procesando: { label: "Indexando...", color: "var(--warning)", bg: "var(--warning-bg)" },
+  indexado: { label: "Indexado", color: "var(--success)", bg: "var(--success-bg)" },
+  error: { label: "Error", color: "var(--danger)", bg: "var(--danger-bg)" },
+};
+const EN_CURSO = ["en_cola", "procesando"];
+
+function JobBadge({ estado }) {
+  const { label, color, bg } = JOB_LABEL[estado] ?? JOB_LABEL.en_cola;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, fontWeight: 600, color, background: bg, border: "1px solid var(--border)", borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" }}>
+      {estado === "procesando" ? <Clock size={11} /> : estado === "error" ? <AlertCircle size={11} /> : estado === "indexado" ? <CheckCircle size={11} /> : null}
+      {label}
+    </span>
+  );
+}
+
+function sinExtension(nombreArchivo) {
+  return nombreArchivo.replace(/\.[^.]+$/, "");
+}
 
 /* ── Color de cada tipo de mensaje (variables de index.css) ── */
 const ALERT_COLOR = { success: "success", info: "warning", error: "danger" };
@@ -69,7 +95,7 @@ export default function IngestPage() {
   /* ── Estado del formulario ── */
   const [carreras, setCarreras] = useState([]);
   const [selectedCarrera, setSelectedCarrera] = useState("");
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [nombre, setNombre] = useState("");
   const [descripcion, setDescripcion] = useState("");
   const [uploading, setUploading] = useState(false);
@@ -84,8 +110,8 @@ export default function IngestPage() {
   const [loadingDocs, setLoadingDocs] = useState(false);
 
   /* ── Estado de indexaciones en segundo plano ── */
-  const [pending, setPending] = useState([]); // [{ id, nombre }]
-  const [jobsSummary, setJobsSummary] = useState({ procesando: 0, errores: 0 });
+  const [jobs, setJobs] = useState([]); // [{ id, nombre, estado, nodes, duracion, error }]
+  const [jobsSummary, setJobsSummary] = useState({ en_cola: 0, procesando: 0, errores: 0 });
 
   /* ── Cargar carreras desde Supabase ── */
   useEffect(() => {
@@ -122,7 +148,7 @@ export default function IngestPage() {
   const fetchJobs = useCallback(async () => {
     try {
       const { data } = await getIngestJobs();
-      setJobsSummary({ procesando: data.procesando ?? 0, errores: data.errores ?? 0 });
+      setJobsSummary({ en_cola: data.en_cola ?? 0, procesando: data.procesando ?? 0, errores: data.errores ?? 0 });
     } catch {
       /* si falla, se mantienen los últimos valores */
     }
@@ -130,89 +156,118 @@ export default function IngestPage() {
 
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
 
-  /* ── Seguimiento de documentos que se están indexando ── */
+  /* ── Seguimiento de documentos en cola o indexándose ── */
+  const hayEnCurso = jobs.some((j) => EN_CURSO.includes(j.estado));
   useEffect(() => {
-    if (pending.length === 0) return undefined;
+    if (!hayEnCurso) return undefined;
     const timer = setInterval(async () => {
-      for (const job of pending) {
+      const activos = jobs.filter((j) => EN_CURSO.includes(j.estado));
+      let terminoAlguno = false;
+      const updates = {};
+      for (const job of activos) {
         try {
           const { data } = await getIngestStatus(job.id);
-          if (data.estado === "procesando") continue;
-          setPending((prev) => prev.filter((p) => p.id !== job.id));
-          if (data.estado === "indexado") {
-            setUploadMsg({
-              type: "success",
-              text: `✅ "${job.nombre}" indexado: ${data.nodes_indexed} fragmentos en ${data.duracion_s} s.`,
-            });
-          } else {
-            setUploadMsg({ type: "error", text: `No se pudo indexar "${job.nombre}": ${data.error}` });
+          if (data.estado !== job.estado) {
+            updates[job.id] = { estado: data.estado, nodes: data.nodes_indexed, duracion: data.duracion_s, error: data.error };
+            if (!EN_CURSO.includes(data.estado)) terminoAlguno = true;
           }
-          fetchDocumentos();
-          fetchJobs();
         } catch {
           /* se reintenta en el siguiente ciclo */
         }
       }
+      if (Object.keys(updates).length > 0) {
+        setJobs((prev) => prev.map((j) => (updates[j.id] ? { ...j, ...updates[j.id] } : j)));
+      }
+      if (terminoAlguno) {
+        fetchDocumentos();
+      }
+      fetchJobs();
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [pending, fetchDocumentos, fetchJobs]);
+  }, [jobs, hayEnCurso, fetchDocumentos, fetchJobs]);
 
-  /* ── Manejo de archivo ── */
-  function handleFileSelect(f) {
-    if (!f) return;
-    if (!ACCEPTED_MIME.includes(f.type)) {
-      setUploadMsg({ type: "error", text: `Tipo no permitido. Usa: ${ACCEPTED_EXTS.join(", ")}` });
-      return;
+  /* ── Manejo de archivos (uno o varios) ── */
+  function handleFilesSelect(fileList) {
+    const nuevos = Array.from(fileList ?? []);
+    if (nuevos.length === 0) return;
+    const rechazados = [];
+    const aceptados = [];
+    for (const f of nuevos) {
+      if (!ACCEPTED_MIME.includes(f.type)) rechazados.push(`${f.name} (tipo no permitido)`);
+      else if (f.size > MAX_MB * 1024 * 1024) rechazados.push(`${f.name} (supera ${MAX_MB} MB)`);
+      else aceptados.push(f);
     }
-    if (f.size > 50 * 1024 * 1024) {
-      setUploadMsg({ type: "error", text: "El archivo supera los 50 MB." });
-      return;
-    }
-    setFile(f);
-    setUploadMsg(null);
-    if (!nombre) setNombre(f.name.replace(/\.[^.]+$/, ""));
+    setFiles((prev) => {
+      const yaEsta = (f) => prev.some((p) => p.name === f.name && p.size === f.size);
+      const lista = [...prev, ...aceptados.filter((f) => !yaEsta(f))];
+      if (lista.length === 1 && !nombre) setNombre(sinExtension(lista[0].name));
+      return lista;
+    });
+    setUploadMsg(
+      rechazados.length > 0
+        ? { type: "error", text: `No se agregaron: ${rechazados.join(", ")}. Usa: ${ACCEPTED_EXTS.join(", ")}.` }
+        : null
+    );
+  }
+
+  function removeFile(index) {
+    setFiles((prev) => {
+      const lista = prev.filter((_, i) => i !== index);
+      if (lista.length !== 1) setNombre("");
+      return lista;
+    });
   }
 
   function onDrop(e) {
     e.preventDefault();
     setDragOver(false);
-    handleFileSelect(e.dataTransfer.files[0]);
+    handleFilesSelect(e.dataTransfer.files);
   }
 
-  /* ── Submit del formulario ── */
+  /* ── Submit: sube cada archivo por separado ── */
   async function handleUpload(e) {
     e.preventDefault();
-    if (!file) { setUploadMsg({ type: "error", text: "Selecciona un archivo primero." }); return; }
+    if (files.length === 0) { setUploadMsg({ type: "error", text: "Selecciona al menos un archivo." }); return; }
     if (!selectedCarrera) { setUploadMsg({ type: "error", text: "Selecciona una carrera." }); return; }
-    if (!nombre.trim()) { setUploadMsg({ type: "error", text: "Ingresa un nombre para el documento." }); return; }
+    if (files.length === 1 && !nombre.trim()) { setUploadMsg({ type: "error", text: "Ingresa un nombre para el documento." }); return; }
 
     setUploading(true);
     setUploadMsg(null);
 
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("nombre_documento", nombre.trim());
-    fd.append("descripcion", descripcion.trim());
-    fd.append("id_carrera", selectedCarrera);
-
-    try {
-      const res = await uploadDocument(fd);
-      setPending((prev) => [...prev, { id: res.data.document_id, nombre: res.data.nombre_documento }]);
-      setUploadMsg({
-        type: "info",
-        text: `"${res.data.nombre_documento}" recibido. Se está indexando en segundo plano; puedes seguir usando el sistema.`,
-      });
-      setFile(null);
-      setNombre("");
-      setDescripcion("");
-      fetchDocumentos();
-      fetchJobs();
-    } catch (err) {
-      const detail = err.response?.data?.detail ?? err.message;
-      setUploadMsg({ type: "error", text: `Error: ${detail}` });
-    } finally {
-      setUploading(false);
+    const recibidos = [];
+    const fallidos = [];
+    for (const f of files) {
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("nombre_documento", files.length === 1 ? nombre.trim() : sinExtension(f.name));
+      fd.append("descripcion", descripcion.trim());
+      fd.append("id_carrera", selectedCarrera);
+      try {
+        const res = await uploadDocument(fd);
+        recibidos.push({ id: res.data.document_id, nombre: res.data.nombre_documento, estado: res.data.estado ?? "en_cola" });
+      } catch (err) {
+        fallidos.push(`${f.name}: ${err.response?.data?.detail ?? err.message}`);
+      }
     }
+
+    if (recibidos.length > 0) setJobs((prev) => [...recibidos, ...prev]);
+    setFiles((prev) => prev.filter((f) => fallidos.some((m) => m.startsWith(`${f.name}:`))));
+    if (fallidos.length === 0) { setNombre(""); setDescripcion(""); }
+
+    const partes = [];
+    if (recibidos.length > 0) {
+      partes.push(
+        recibidos.length === 1
+          ? `"${recibidos[0].nombre}" recibido. Se indexa en segundo plano; puedes seguir usando el sistema.`
+          : `${recibidos.length} documentos recibidos. Se indexan uno por uno en segundo plano; puedes seguir usando el sistema.`
+      );
+    }
+    if (fallidos.length > 0) partes.push(`No se pudieron subir: ${fallidos.join("; ")}`);
+    setUploadMsg({ type: fallidos.length > 0 ? "error" : "info", text: partes.join(" ") });
+
+    setUploading(false);
+    fetchDocumentos();
+    fetchJobs();
   }
 
   /* ── Filtrado del historial ── */
@@ -270,17 +325,23 @@ export default function IngestPage() {
             </select>
           </div>
 
-          {/* Nombre del documento */}
+          {/* Nombre del documento (solo con un archivo; con varios se usa el nombre de cada uno) */}
           <div style={styles.fieldGroup}>
             <label style={styles.label}>Nombre del documento</label>
-            <input
-              style={styles.input}
-              type="text"
-              placeholder="Ej: Reglamento Académico 2025"
-              value={nombre}
-              onChange={(e) => setNombre(e.target.value)}
-              disabled={uploading}
-            />
+            {files.length > 1 ? (
+              <p style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                Con varios archivos se usa el nombre de cada archivo como nombre del documento.
+              </p>
+            ) : (
+              <input
+                style={styles.input}
+                type="text"
+                placeholder="Ej: Reglamento Académico 2025"
+                value={nombre}
+                onChange={(e) => setNombre(e.target.value)}
+                disabled={uploading}
+              />
+            )}
           </div>
 
           {/* Descripción opcional */}
@@ -298,36 +359,46 @@ export default function IngestPage() {
 
           {/* Dropzone */}
           <div
-            style={{ ...styles.dropzone, ...(dragOver ? styles.dropzoneActive : {}), ...(file ? styles.dropzoneFilled : {}) }}
+            style={{ ...styles.dropzone, ...(dragOver ? styles.dropzoneActive : {}), ...(files.length > 0 ? styles.dropzoneFilled : {}) }}
             onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
             onDragLeave={() => setDragOver(false)}
             onDrop={onDrop}
-            onClick={() => !file && fileInputRef.current?.click()}
+            onClick={() => !uploading && fileInputRef.current?.click()}
           >
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               accept={ACCEPTED_MIME.join(",")}
               style={{ display: "none" }}
-              onChange={(e) => handleFileSelect(e.target.files[0])}
+              onChange={(e) => { handleFilesSelect(e.target.files); e.target.value = ""; }}
             />
 
-            {file ? (
-              <div style={styles.filePreview}>
-                <FileText size={28} color="var(--accent)" />
-                <div style={{ flex: 1 }}>
-                  <p style={{ fontWeight: 600, color: "var(--text-h)", fontSize: 13 }}>{file.name}</p>
-                  <p style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                    {extLabel(file.name)} · {(file.size / 1024).toFixed(1)} KB
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  style={styles.removeFile}
-                  onClick={(e) => { e.stopPropagation(); setFile(null); setNombre(""); }}
-                >
-                  <X size={14} />
-                </button>
+            {files.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
+                {files.map((f, i) => (
+                  <div key={`${f.name}-${f.size}`} style={styles.filePreview}>
+                    <FileText size={22} color="var(--accent)" />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <p style={{ fontWeight: 600, color: "var(--text-h)", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</p>
+                      <p style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        {extLabel(f.name)} · {(f.size / 1024).toFixed(1)} KB
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      style={styles.removeFile}
+                      title="Quitar archivo"
+                      onClick={(e) => { e.stopPropagation(); removeFile(i); }}
+                      disabled={uploading}
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+                <p style={{ fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>
+                  {files.length} archivo{files.length > 1 ? "s" : ""} · haz clic o arrastra más para agregarlos
+                </p>
               </div>
             ) : (
               <>
@@ -335,7 +406,7 @@ export default function IngestPage() {
                   <FileUp size={28} color="var(--accent)" />
                 </div>
                 <p style={{ fontWeight: 600, color: "var(--text-h)", margin: "8px 0 4px", fontSize: 14 }}>
-                  Arrastra y suelta tu documento
+                  Arrastra y suelta uno o varios documentos
                 </p>
                 <p style={{ fontSize: 13, color: "var(--text)" }}>
                   o{" "}
@@ -344,7 +415,7 @@ export default function IngestPage() {
                   </span>
                 </p>
                 <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 8 }}>
-                  {ACCEPTED_EXTS.join("  ·  ")} · Máx. 50 MB
+                  {ACCEPTED_EXTS.join("  ·  ")} · Máx. {MAX_MB} MB por archivo
                 </p>
               </>
             )}
@@ -374,11 +445,30 @@ export default function IngestPage() {
               </>
             ) : (
               <>
-                <Upload size={15} /> Cargar documento
+                <Upload size={15} /> {files.length > 1 ? `Cargar ${files.length} documentos` : "Cargar documento"}
               </>
             )}
           </button>
         </form>
+
+        {/* ── Cola de indexación de esta sesión ── */}
+        {jobs.length > 0 && (
+          <div style={styles.queue}>
+            <p style={{ fontSize: 12, fontWeight: 600, color: "var(--text-h)", marginBottom: 6 }}>Cola de indexación</p>
+            {jobs.map((j) => (
+              <div key={j.id} style={styles.queueRow}>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text-h)" }} title={j.nombre}>
+                  {j.nombre}
+                </span>
+                <span style={{ fontSize: 11, color: j.estado === "error" ? "var(--danger)" : "var(--text-muted)", whiteSpace: "nowrap" }}>
+                  {j.estado === "indexado" && `${j.nodes} fragmentos · ${j.duracion} s`}
+                  {j.estado === "error" && (j.error ?? "").slice(0, 60)}
+                </span>
+                <JobBadge estado={j.estado} />
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ── Contadores ── */}
         <div style={styles.counters}>
@@ -387,7 +477,7 @@ export default function IngestPage() {
             <span style={{ fontSize: 12, color: "var(--success)" }}>Documentos indexados</span>
           </div>
           <div style={{ ...styles.counterCard, borderColor: "var(--warning)", background: "var(--warning-bg)" }}>
-            <span style={{ ...styles.counterNum, color: "var(--warning)" }}>{jobsSummary.procesando}</span>
+            <span style={{ ...styles.counterNum, color: "var(--warning)" }}>{jobsSummary.procesando + jobsSummary.en_cola}</span>
             <span style={{ fontSize: 12, color: "var(--warning)" }}>En proceso</span>
           </div>
           <div style={{ ...styles.counterCard, borderColor: "var(--danger)", background: "var(--danger-bg)" }}>
@@ -457,7 +547,9 @@ export default function IngestPage() {
                     <span style={styles.extTag}>
                       {doc.tipo_documento?.nombre_tipo?.toUpperCase() ?? extLabel(doc.ruta_archivo)}
                     </span>
-                    <StatusBadge estadoNombre={doc.estado?.nombre_estado ?? "subido"} />
+                    {EN_CURSO.includes(jobs.find((j) => j.id === doc.id)?.estado)
+                      ? <JobBadge estado={jobs.find((j) => j.id === doc.id).estado} />
+                      : <StatusBadge estadoNombre={doc.estado?.nombre_estado ?? "subido"} />}
                   </div>
                   <p style={styles.docDate}>{formatDate(doc.fecha_carga)}</p>
                 </div>
@@ -608,6 +700,22 @@ const styles = {
     borderTopColor: "#fff",
     borderRadius: "50%",
     animation: "spin .7s linear infinite",
+  },
+
+  queue: {
+    marginTop: 18,
+    padding: "12px 14px",
+    borderRadius: "var(--radius)",
+    border: "1px solid var(--border)",
+    background: "var(--bg-card)",
+    maxWidth: 560,
+  },
+  queueRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "6px 0",
+    borderTop: "1px solid var(--border)",
   },
 
   counters: {
