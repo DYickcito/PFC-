@@ -46,14 +46,15 @@ BATCH_DELAY_SEC = 12.0
 # ─────────────────────────────────────────────
 # Catálogo único de modelos LLM disponibles en Groq.
 # Es la única fuente de verdad: el router y el frontend leen de aquí.
-# extra_kwargs se envía tal cual a la API de Groq.
+# extra_kwargs se pasa al cliente de Groq; los parámetros propios de Groq
+# van dentro de extra_body porque el cliente openai no los acepta sueltos.
 #   - Qwen 3.6 tiene modo de razonamiento; "hidden" evita que el texto
 #     de razonamiento (<think>...</think>) aparezca en la respuesta.
 # ─────────────────────────────────────────────
 LLM_MODELS = {
     "qwen/qwen3.6-27b": {
         "label": "Qwen 3.6 27B (Groq)",
-        "extra_kwargs": {"reasoning_format": "hidden"},
+        "extra_kwargs": {"extra_body": {"reasoning_format": "hidden"}},
     },
     "openai/gpt-oss-20b": {
         "label": "GPT-OSS 20B (Groq)",
