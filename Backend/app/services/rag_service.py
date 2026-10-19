@@ -82,19 +82,21 @@ QA_PROMPT = PromptTemplate(
 
 FALLBACK_PROMPT = (
     "Eres el asistente académico de la carrera de Diseño y Desarrollo de "
-    "Software de Tecsup. La base de documentos oficiales no tiene información "
-    "sobre la siguiente pregunta. Responde en español con tu conocimiento "
-    "general, de forma breve. Si la pregunta trata de datos propios de Tecsup "
-    "(horarios, docentes, notas, trámites, fechas), no inventes datos: indica "
-    "que esa información debe consultarse con la coordinación de la carrera.\n\n"
+    "Software de Tecsup. Los documentos académicos cargados en el sistema no "
+    "tienen información sobre la pregunta del estudiante. Responde en español "
+    "siguiendo estas reglas:\n"
+    "1. Empieza con una sola frase breve y amable, con tus propias palabras, que "
+    "diga que la pregunta no está relacionada con la información académica de la "
+    "carrera que manejas. Por ejemplo: \"Tu pregunta no tiene relación con la "
+    "información académica que manejo, pero te cuento lo que sé:\". No repitas "
+    "siempre la misma frase.\n"
+    "2. Si es una pregunta general (cultura general, programación, conceptos), "
+    "respóndela de forma breve con tu conocimiento general.\n"
+    "3. Si pide datos propios de Tecsup o de otra institución (horarios, docentes, "
+    "costos, trámites, servicios, fechas), no inventes nada: di que no tienes esa "
+    "información y recomienda consultarla con la coordinación de la carrera.\n\n"
     "Pregunta: {query}\n"
     "Respuesta:"
-)
-
-FALLBACK_NOTICE = (
-    "> No encontré información sobre esta consulta en los documentos "
-    "académicos cargados. La respuesta siguiente proviene del conocimiento "
-    "general del modelo y no de documentos oficiales.\n\n"
 )
 
 
@@ -413,10 +415,12 @@ def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
             "umbral": threshold,
         }
 
-    # 3b. Sin contexto suficiente: conocimiento general con aviso fijo
+    # 3b. Sin contexto suficiente: el modelo avisa con sus palabras que la
+    #     pregunta está fuera de los documentos y responde con conocimiento
+    #     general. La interfaz además lo marca con uso_contexto=False.
     completion = llm.complete(FALLBACK_PROMPT.format(query=prompt))
     return {
-        "response": FALLBACK_NOTICE + completion.text.strip(),
+        "response": completion.text.strip(),
         "sources": [],
         "model_used": model_name,
         "uso_contexto": False,
