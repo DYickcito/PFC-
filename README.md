@@ -7,9 +7,9 @@ Proyecto de fin de carrera, Tecsup, 2026. Se desarrolla con Scrum.
 ## Cómo funciona
 
 1. El administrador sube un documento (PDF, Word, Excel, CSV o TXT). El backend extrae el texto, lo limpia (encabezados, pies y números de página repetidos), lo divide en fragmentos y guarda sus vectores en Qdrant. Esto corre en segundo plano y en cola.
-2. Cuando alguien pregunta, la pregunta se convierte en vector con Gemini y se buscan los 5 fragmentos más cercanos.
+2. Cuando alguien pregunta, la pregunta se convierte en vector con Gemini y se buscan los 5 fragmentos más cercanos. Los saludos y las preguntas sobre el propio asistente ("hola", "qué datos tienes") se responden sin buscar, y una pregunta repetida en los últimos 10 minutos sale de una caché en memoria.
 3. Si algún fragmento supera el umbral de similitud (0.58 por defecto), el modelo responde solo con esos fragmentos y la interfaz muestra las fuentes. Si ninguno lo supera, el asistente avisa que la pregunta no está en los documentos y responde con conocimiento general, sin inventar datos de la institución.
-4. Cada consulta se guarda en la tabla `consulta` de Supabase para el historial.
+4. La respuesta llega en streaming: el texto aparece mientras el modelo escribe. Cada consulta se guarda en la tabla `consulta` de Supabase para el historial, junto con el tiempo que tardó.
 
 ## Tecnologías
 
@@ -111,18 +111,21 @@ La aplicación queda en `http://localhost:5173`.
 
 ## Uso
 
-* **Chat** (todos los roles): preguntas en lenguaje natural. Cada respuesta indica si salió de los documentos o de conocimiento general, las fuentes usadas y el tiempo que tardó. El botón Historial muestra tus consultas anteriores.
+* **Chat** (todos los roles): preguntas en lenguaje natural. Cada respuesta indica si salió de los documentos o de conocimiento general, las fuentes usadas y el tiempo que tardó; al pasar el mouse por el tiempo se ve cuánto tomó cada etapa. El botón Historial muestra tus consultas anteriores, donde puedes fijar las importantes y borrar las que elijas o todo el historial.
 * **Ingesta** (solo administradores): subir uno o varios documentos a la vez y asignarles carrera y descripción. Desde el historial de documentos se puede editar el nombre, la carrera o la descripción, reemplazar el archivo por una versión nueva, descargarlo o eliminarlo.
 
 ## Endpoints
 
-Todos piden el token de Supabase en el encabezado `Authorization: Bearer <token>`.
+Todos piden el token de Supabase en el encabezado `Authorization: Bearer <token>`. El backend valida la firma del token con las llaves públicas del proyecto, sin llamar a Supabase en cada consulta.
 
 | Método | Ruta | Descripción |
 |---|---|---|
 | POST | `/api/v1/chat/query` | Hacer una consulta |
+| POST | `/api/v1/chat/query/stream` | Hacer una consulta con la respuesta en streaming (NDJSON) |
 | GET | `/api/v1/chat/models` | Modelos disponibles |
-| GET | `/api/v1/chat/history` | Historial del usuario |
+| GET | `/api/v1/chat/history` | Historial del usuario (las fijadas primero) |
+| PATCH | `/api/v1/chat/history/{id}` | Fijar o desfijar una consulta |
+| POST | `/api/v1/chat/history/delete` | Borrar consultas elegidas o todo el historial |
 | POST | `/api/v1/ingest/upload` | Subir un documento (admin) |
 | POST | `/api/v1/ingest/documents/{id}/replace` | Reemplazar por una versión nueva (admin) |
 | PATCH | `/api/v1/ingest/documents/{id}` | Editar nombre, descripción o carrera (admin) |

@@ -8,6 +8,8 @@ Gestiona:
   - LLM dinámico con Groq (selección de modelo por solicitud)
   - Enrutamiento por puntaje de similitud: si ningún fragmento supera el
     umbral, se responde con conocimiento general y se avisa al usuario
+  - Atajo para saludos y preguntas sobre el asistente (no busca en Qdrant)
+  - Caché en memoria de respuestas recientes y respuesta en streaming
 """
 import asyncio
 import csv
@@ -17,19 +19,19 @@ import math
 import re
 import time
 import unicodedata
-from collections import Counter
+from collections import Counter, OrderedDict
+from functools import lru_cache
 from pathlib import Path
-from typing import List, Optional
+from typing import AsyncIterator, List, Optional
 
 from llama_index.core import (
     PromptTemplate,
     Settings as LlamaSettings,
     StorageContext,
     VectorStoreIndex,
-    get_response_synthesizer,
 )
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core.schema import Document, NodeWithScore
+from llama_index.core.schema import Document, MetadataMode, NodeWithScore, QueryBundle
 from llama_index.embeddings.gemini import GeminiEmbedding
 from llama_index.llms.groq import Groq
 from llama_index.vector_stores.qdrant import QdrantVectorStore
@@ -295,8 +297,13 @@ def _get_storage_context() -> StorageContext:
     return StorageContext.from_defaults(vector_store=_get_vector_store())
 
 
+@lru_cache(maxsize=1)
 def _load_index_from_qdrant() -> VectorStoreIndex:
-    """Carga el índice existente desde Qdrant sin re-indexar."""
+    """
+    Carga el índice existente desde Qdrant sin re-indexar. Se crea una sola
+    vez y se reutiliza: el índice no guarda datos propios, cada búsqueda va a
+    Qdrant, así que los documentos nuevos o eliminados se ven al instante.
+    """
     return VectorStoreIndex.from_vector_store(
         vector_store=_get_vector_store(),
     )
@@ -416,8 +423,12 @@ def delete_document_vectors(document_id: str) -> None:
 # ─────────────────────────────────────────────
 # LLM Groq — selección dinámica por request
 # ─────────────────────────────────────────────
+@lru_cache(maxsize=None)
 def _build_groq_llm(model_name: str) -> Groq:
-    """Instancia el LLM Groq con el modelo especificado y validado."""
+    """
+    Instancia el LLM Groq con el modelo especificado y validado. Se guarda
+    uno por modelo para reutilizar la conexión HTTPS entre consultas.
+    """
     if model_name not in ALLOWED_MODELS:
         raise ValueError(
             f"Modelo '{model_name}' no permitido. "
@@ -464,20 +475,26 @@ def route_by_similarity(nodes: List[NodeWithScore], threshold: float):
 # ─────────────────────────────────────────────
 # Catálogo de documentos cargados (para saludos y preguntas sobre el asistente)
 # ─────────────────────────────────────────────
-_CATALOGO_TTL_SEC = 60
+# Se invalida al subir, editar o eliminar documentos, así que puede durar una hora
+_CATALOGO_TTL_SEC = 3600
 _catalogo_cache = {"momento": 0.0, "texto": ""}
 
 
 def invalidar_catalogo() -> None:
-    """Fuerza a releer el catálogo en la próxima consulta (tras subir, editar o eliminar)."""
+    """
+    Fuerza a releer el catálogo en la próxima consulta (tras subir, editar o
+    eliminar). También vacía la caché de respuestas, porque una respuesta
+    guardada podría citar un documento que cambió.
+    """
     _catalogo_cache["momento"] = 0.0
+    _respuestas_cache.clear()
 
 
 def catalogo_documentos() -> str:
     """
     Lista de documentos registrados en Supabase (nombre, tipo, carrera y
-    descripción), en texto para el prompt. Se guarda 60 segundos en memoria
-    para no consultar Supabase en cada pregunta. Si la consulta falla, se usa
+    descripción), en texto para el prompt. Se guarda en memoria (una hora o
+    hasta que cambien los documentos) para no consultar Supabase en cada pregunta. Si la consulta falla, se usa
     el último valor conocido.
     """
     ahora = time.monotonic()
@@ -510,14 +527,114 @@ def catalogo_documentos() -> str:
         return _catalogo_cache["texto"] or "- (no se pudo obtener la lista de documentos)"
 
 
-def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
-    """Parte bloqueante de la consulta; se ejecuta en un hilo aparte."""
-    llm = _build_groq_llm(model_name)
-    threshold = settings.similarity_threshold
+# ─────────────────────────────────────────────
+# Atajo para saludos y preguntas sobre el asistente
+# ─────────────────────────────────────────────
+_PALABRAS_SALUDO = {
+    "hola", "holi", "holaa", "buenas", "buenos", "buen", "dia", "dias", "tardes", "noches",
+    "hey", "saludos", "que", "tal", "como", "estas", "gracias", "muchas", "mil", "ok", "okay",
+    "vale", "chau", "chao", "adios", "hasta", "luego", "pronto", "nos", "vemos", "bot", "asistente",
+}
+_PREGUNTA_META = re.compile(
+    r"^(que|cuales) (datos|informacion|documentos|temas|archivos) (tienes|manejas|conoces|hay|sabes)"
+    r"|^que (sabes|puedes) (hacer|responder|contestar)"
+    r"|^(quien|que) eres|^como te llamas|^para que sirves|^(ayuda|ayudame|help)$"
+)
 
-    # 1. Recuperar los fragmentos más parecidos
+
+def _normalizar_pregunta(texto: str) -> str:
+    """Minúsculas, sin tildes ni signos de puntuación y con espacios simples."""
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r"[^\w\s]", " ", texto)
+    return " ".join(texto.split())
+
+
+def es_conversacional(prompt: str) -> bool:
+    """
+    True si el mensaje es solo un saludo, un agradecimiento o una pregunta
+    sobre el propio asistente ("hola", "gracias", "qué datos tienes"). Esos
+    mensajes no necesitan buscar en Qdrant: se responden directo con el
+    catálogo de documentos, lo que ahorra el embedding y la búsqueda.
+    """
+    texto = _normalizar_pregunta(prompt)
+    palabras = texto.split()
+    if not palabras or len(palabras) > 8:
+        return False
+    return all(p in _PALABRAS_SALUDO for p in palabras) or bool(_PREGUNTA_META.search(texto))
+
+
+# ─────────────────────────────────────────────
+# Caché de respuestas recientes
+# Muchos alumnos hacen la misma pregunta; si ya se respondió hace poco y los
+# documentos no cambiaron, se devuelve la misma respuesta sin llamar a Gemini,
+# Qdrant ni Groq. Vive en memoria: se pierde al reiniciar el backend.
+# ─────────────────────────────────────────────
+_CACHE_TTL_SEC = 600
+_CACHE_MAX = 200
+_respuestas_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+
+
+def _cache_key(prompt: str, model_name: str, similarity_top_k: int) -> tuple:
+    return (_normalizar_pregunta(prompt), model_name, similarity_top_k)
+
+
+def _cache_get(key: tuple) -> Optional[dict]:
+    item = _respuestas_cache.get(key)
+    if not item:
+        return None
+    momento, resultado = item
+    if time.monotonic() - momento > _CACHE_TTL_SEC:
+        _respuestas_cache.pop(key, None)
+        return None
+    _respuestas_cache.move_to_end(key)
+    return resultado
+
+
+def _cache_put(key: tuple, resultado: dict) -> None:
+    _respuestas_cache[key] = (time.monotonic(), resultado)
+    _respuestas_cache.move_to_end(key)
+    while len(_respuestas_cache) > _CACHE_MAX:
+        _respuestas_cache.popitem(last=False)
+
+
+# ─────────────────────────────────────────────
+# Consulta: preparación compartida por la versión normal y la de streaming
+# ─────────────────────────────────────────────
+def _ms(desde: float) -> int:
+    return int((time.perf_counter() - desde) * 1000)
+
+
+def _preparar_consulta(prompt: str, similarity_top_k: int) -> dict:
+    """
+    Parte bloqueante previa al LLM (se ejecuta en un hilo aparte):
+    recupera fragmentos, enruta por puntaje y arma el prompt final.
+    """
+    threshold = settings.similarity_threshold
+    t0 = time.perf_counter()
+
+    if es_conversacional(prompt):
+        logger.info("💬 Mensaje conversacional: se responde sin buscar en Qdrant")
+        return {
+            "llm_prompt": FALLBACK_PROMPT.format(catalogo=catalogo_documentos(), query=prompt),
+            "sources": [],
+            "uso_contexto": False,
+            "conversacional": True,
+            "max_score": None,
+            "umbral": threshold,
+            "recuperacion_ms": _ms(t0),
+            "embedding_ms": 0,
+            "busqueda_ms": 0,
+        }
+
+    # 1. Recuperar los fragmentos más parecidos: primero el vector de la
+    #    pregunta (Gemini) y luego la búsqueda (Qdrant), medidos por separado
+    embedding = LlamaSettings.embed_model.get_query_embedding(prompt)
+    embedding_ms = _ms(t0)
+    t1 = time.perf_counter()
     retriever = _load_index_from_qdrant().as_retriever(similarity_top_k=similarity_top_k)
-    retrieved = retriever.retrieve(prompt)
+    retrieved = retriever.retrieve(QueryBundle(query_str=prompt, embedding=embedding))
+    busqueda_ms = _ms(t1)
 
     # 2. Enrutar según el puntaje
     relevant, max_score = route_by_similarity(retrieved, threshold)
@@ -527,36 +644,68 @@ def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
     )
 
     if relevant:
-        # 3a. Hay contexto oficial: respuesta basada en documentos
-        synthesizer = get_response_synthesizer(
-            llm=llm,
-            text_qa_template=QA_PROMPT,
-            response_mode="compact",
-        )
-        response = synthesizer.synthesize(prompt, nodes=relevant)
-        return {
-            "response": str(response),
-            "sources": _format_sources(relevant),
-            "model_used": model_name,
-            "uso_contexto": True,
-            "max_score": max_score,
-            "umbral": threshold,
-        }
+        # 3a. Hay contexto oficial: el prompt lleva los fragmentos
+        contexto = "\n\n".join(n.node.get_content(metadata_mode=MetadataMode.LLM) for n in relevant)
+        llm_prompt = QA_PROMPT.format(context_str=contexto, query_str=prompt)
+        sources = _format_sources(relevant)
+    else:
+        # 3b. Sin contexto suficiente: el modelo avisa con sus palabras que la
+        #     pregunta está fuera de los documentos y responde con conocimiento
+        #     general. La interfaz además lo marca con uso_contexto=False.
+        llm_prompt = FALLBACK_PROMPT.format(catalogo=catalogo_documentos(), query=prompt)
+        sources = []
 
-    # 3b. Sin contexto suficiente: el modelo avisa con sus palabras que la
-    #     pregunta está fuera de los documentos y responde con conocimiento
-    #     general. La interfaz además lo marca con uso_contexto=False.
-    completion = llm.complete(
-        FALLBACK_PROMPT.format(catalogo=catalogo_documentos(), query=prompt)
-    )
     return {
-        "response": completion.text.strip(),
-        "sources": [],
-        "model_used": model_name,
-        "uso_contexto": False,
+        "llm_prompt": llm_prompt,
+        "sources": sources,
+        "uso_contexto": bool(relevant),
+        "conversacional": False,
         "max_score": max_score,
         "umbral": threshold,
+        "recuperacion_ms": _ms(t0),
+        "embedding_ms": embedding_ms,
+        "busqueda_ms": busqueda_ms,
     }
+
+
+def _resultado(prep: dict, texto: str, model_name: str, generacion_ms: int) -> dict:
+    return {
+        "response": texto.strip(),
+        "sources": prep["sources"],
+        "model_used": model_name,
+        "uso_contexto": prep["uso_contexto"],
+        "conversacional": prep["conversacional"],
+        "max_score": prep["max_score"],
+        "umbral": prep["umbral"],
+        "cache": False,
+        "tiempos": {
+            "recuperacion_ms": prep["recuperacion_ms"],
+            "embedding_ms": prep["embedding_ms"],
+            "busqueda_ms": prep["busqueda_ms"],
+            "generacion_ms": generacion_ms,
+        },
+    }
+
+
+def _desde_cache(resultado: dict) -> dict:
+    return {**resultado, "cache": True, "tiempos": {"recuperacion_ms": 0, "generacion_ms": 0}}
+
+
+def _run_query(prompt: str, model_name: str, similarity_top_k: int) -> dict:
+    """Consulta completa sin streaming; se ejecuta en un hilo aparte."""
+    llm = _build_groq_llm(model_name)
+    key = _cache_key(prompt, model_name, similarity_top_k)
+    guardado = _cache_get(key)
+    if guardado:
+        logger.info("⚡ Respuesta tomada de la caché")
+        return _desde_cache(guardado)
+
+    prep = _preparar_consulta(prompt, similarity_top_k)
+    t0 = time.perf_counter()
+    texto = llm.complete(prep["llm_prompt"]).text
+    resultado = _resultado(prep, texto, model_name, _ms(t0))
+    _cache_put(key, resultado)
+    return resultado
 
 
 async def query_rag(
@@ -566,12 +715,63 @@ async def query_rag(
 ) -> dict:
     """
     Pipeline RAG completo:
-      1. Recupera chunks de Qdrant usando embeddings Gemini.
-      2. Compara el score máximo con el umbral configurado.
+      1. Si es un saludo o una pregunta sobre el asistente, no busca en Qdrant.
+      2. Si no, recupera chunks de Qdrant usando embeddings Gemini y compara
+         el score máximo con el umbral configurado.
       3. Si supera el umbral, genera la respuesta con esos fragmentos;
          si no, responde con conocimiento general y lo indica al usuario.
 
-    Retorna: response, sources, model_used, uso_contexto, max_score, umbral.
+    Retorna: response, sources, model_used, uso_contexto, conversacional,
+    max_score, umbral, cache y tiempos (recuperación y generación en ms).
     """
     logger.info(f"🔍 RAG Query | model={model_name} | prompt='{prompt[:80]}...'")
     return await asyncio.to_thread(_run_query, prompt, model_name, similarity_top_k)
+
+
+async def query_rag_stream(
+    prompt: str,
+    model_name: str,
+    similarity_top_k: int = 5,
+) -> AsyncIterator[dict]:
+    """
+    Igual que query_rag, pero entrega la respuesta por partes para que la
+    interfaz la vaya mostrando mientras el modelo escribe. Emite eventos:
+      {"type": "meta", ...}   origen, fuentes y puntajes (antes del texto)
+      {"type": "delta", "text"} cada trozo de texto generado
+      {"type": "done", "resultado"} resultado completo, igual al de query_rag
+    """
+    logger.info(f"🔍 RAG Query (stream) | model={model_name} | prompt='{prompt[:80]}...'")
+    llm = _build_groq_llm(model_name)
+    key = _cache_key(prompt, model_name, similarity_top_k)
+    guardado = _cache_get(key)
+
+    if guardado:
+        logger.info("⚡ Respuesta tomada de la caché")
+        resultado = _desde_cache(guardado)
+        yield {"type": "meta", **{k: v for k, v in resultado.items() if k != "response"}}
+        yield {"type": "delta", "text": resultado["response"]}
+        yield {"type": "done", "resultado": resultado}
+        return
+
+    prep = await asyncio.to_thread(_preparar_consulta, prompt, similarity_top_k)
+    yield {
+        "type": "meta",
+        "sources": prep["sources"],
+        "model_used": model_name,
+        "uso_contexto": prep["uso_contexto"],
+        "conversacional": prep["conversacional"],
+        "max_score": prep["max_score"],
+        "umbral": prep["umbral"],
+        "cache": False,
+    }
+
+    t0 = time.perf_counter()
+    partes: List[str] = []
+    async for chunk in await llm.astream_complete(prep["llm_prompt"]):
+        if chunk.delta:
+            partes.append(chunk.delta)
+            yield {"type": "delta", "text": chunk.delta}
+
+    resultado = _resultado(prep, "".join(partes), model_name, _ms(t0))
+    _cache_put(key, resultado)
+    yield {"type": "done", "resultado": resultado}

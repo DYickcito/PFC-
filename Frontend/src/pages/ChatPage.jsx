@@ -9,8 +9,10 @@
  *  - Input con envío por Enter o botón
  *  - Renderizado de Markdown en las respuestas
  *  - Panel de fuentes citadas en cada respuesta
+ *  - Respuesta en streaming: el texto aparece mientras el modelo escribe
  *  - Indicador de origen: documentos oficiales o conocimiento general
  *    (según el enrutamiento por puntaje de similitud del backend)
+ *  - Tiempo de respuesta con el detalle por etapa al pasar el mouse
  *  - Panel de historial con las consultas anteriores del usuario
  *    (tabla `consulta` de Supabase, vía GET /api/v1/chat/history):
  *    fijar consultas, borrar las elegidas o todo el historial
@@ -22,7 +24,7 @@ import {
   Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info, History, X,
   MessageSquarePlus, Pin, PinOff, Trash2, ListChecks, Square, SquareCheck,
 } from "lucide-react";
-import { sendChatQuery, getAvailableModels, getChatHistory, pinHistoryItem, deleteHistory } from "../services/api";
+import { streamChatQuery, getAvailableModels, getChatHistory, pinHistoryItem, deleteHistory } from "../services/api";
 
 /* ── Mensaje de bienvenida ── */
 const WELCOME = {
@@ -38,6 +40,22 @@ function ordenarHistorial(lista) {
   return [...lista].sort(
     (a, b) => Number(!!b.fijada) - Number(!!a.fijada) || new Date(b.fecha) - new Date(a.fecha)
   );
+}
+
+/* Detalle de tiempos por etapa para el tooltip de la etiqueta de tiempo */
+function detalleTiempos(msg) {
+  if (msg.cache) return "Respuesta guardada: la misma pregunta se respondió hace poco";
+  const t = msg.tiempos;
+  if (!t) return undefined;
+  const s = (ms) => `${((ms ?? 0) / 1000).toFixed(1)} s`;
+  const partes = [`Sesión ${s(t.auth_ms)}`];
+  partes.push(
+    msg.conversacional
+      ? "Búsqueda omitida (saludo)"
+      : `Búsqueda ${s(t.recuperacion_ms)} (Gemini ${s(t.embedding_ms)}, Qdrant ${s(t.busqueda_ms)})`
+  );
+  partes.push(`Respuesta ${s(t.generacion_ms)}`);
+  return partes.join(" · ");
 }
 
 function formatFecha(iso) {
@@ -184,7 +202,7 @@ export default function ChatPage() {
 
   /* Auto-scroll al último mensaje */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    bottomRef.current?.scrollIntoView({ behavior: loading ? "auto" : "smooth" });
   }, [messages, loading]);
 
   /* Enviar mensaje */
@@ -197,28 +215,53 @@ export default function ChatPage() {
     setInput("");
     setLoading(true);
 
+    const assistantId = Date.now() + 1;
+    let started = false;
+    const update = (cambios) =>
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantId ? { ...m, ...(typeof cambios === "function" ? cambios(m) : cambios) } : m))
+      );
+
     try {
-      const res = await sendChatQuery(text, selectedModel, 5);
-      const data = res.data;
-      const assistantMsg = {
-        id: Date.now() + 1,
-        role: "assistant",
-        content: data.response,
-        sources: data.sources ?? [],
-        model: data.model_used,
-        usoContexto: data.uso_contexto,
-        maxScore: data.max_score,
-        tiempoMs: data.tiempo_ms,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-      // El backend guarda la consulta en segundo plano; se refresca el panel poco después
-      if (showHistory) setTimeout(loadHistory, 1500);
+      await streamChatQuery(text, selectedModel, (ev) => {
+        if (ev.type === "meta") {
+          started = true;
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: assistantId,
+              role: "assistant",
+              content: "",
+              streaming: true,
+              sources: ev.sources ?? [],
+              model: ev.model_used,
+              // En un saludo no se muestra la etiqueta de origen
+              usoContexto: ev.conversacional ? undefined : ev.uso_contexto,
+              conversacional: ev.conversacional,
+              maxScore: ev.max_score,
+              cache: ev.cache,
+            },
+          ]);
+        } else if (ev.type === "delta") {
+          update((m) => ({ content: m.content + ev.text }));
+        } else if (ev.type === "done") {
+          update({ streaming: false, tiempoMs: ev.tiempo_ms, tiempos: ev.tiempos, cache: ev.cache });
+        } else if (ev.type === "error") {
+          throw new Error(ev.detail);
+        }
+      });
+      // El backend guarda la consulta al terminar; se refresca el panel poco después
+      if (showHistory) setTimeout(loadHistory, 800);
     } catch (err) {
-      const detail = err.response?.data?.detail ?? "Error al conectar con el servidor.";
+      const detail = err.message || "Error al conectar con el servidor.";
+      if (started) {
+        // Se cortó a mitad de la respuesta: se conserva lo que llegó
+        update((m) => ({ streaming: false, content: m.content ? `${m.content}\n\n_(Respuesta incompleta)_` : m.content }));
+      }
       setMessages((prev) => [
-        ...prev,
+        ...prev.filter((m) => !(m.id === assistantId && !m.content)),
         {
-          id: Date.now() + 1,
+          id: Date.now() + 2,
           role: "error",
           content: `⚠️ ${detail}`,
           sources: [],
@@ -313,8 +356,8 @@ export default function ChatPage() {
           />
         ))}
 
-        {/* Indicador de escritura */}
-        {loading && (
+        {/* Indicador de escritura (hasta que llega el primer dato) */}
+        {loading && !messages.some((m) => m.streaming) && (
           <div style={{ ...styles.bubble, ...styles.bubbleAssistant }}>
             <div style={styles.avatarAssistant}>
               <Bot size={14} color="var(--accent)" />
@@ -554,9 +597,15 @@ function MessageBubble({ msg, expanded, onToggleSources }) {
       </div>
       <div style={styles.assistantContent}>
         {/* Contenido markdown */}
-        <div style={{ ...styles.markdownWrapper, ...(isError ? styles.errorText : {}) }}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
-        </div>
+        {msg.streaming && !msg.content ? (
+          <div style={{ ...styles.typingDots, width: "fit-content" }}>
+            <span /><span /><span />
+          </div>
+        ) : (
+          <div style={{ ...styles.markdownWrapper, ...(isError ? styles.errorText : {}) }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+          </div>
+        )}
 
         {/* Origen de la respuesta */}
         {msg.usoContexto === true && (
@@ -577,11 +626,12 @@ function MessageBubble({ msg, expanded, onToggleSources }) {
           </p>
         )}
 
-        {/* Modelo usado y tiempo */}
-        {msg.model && (
-          <p style={styles.modelLabel}>
+        {/* Modelo usado y tiempo (el detalle por etapa aparece al pasar el mouse) */}
+        {msg.model && !msg.streaming && (
+          <p style={{ ...styles.modelLabel, cursor: detalleTiempos(msg) ? "help" : "default" }} title={detalleTiempos(msg)}>
             <Sparkles size={10} /> {msg.model}
             {msg.tiempoMs != null && ` · ${(msg.tiempoMs / 1000).toFixed(1)} s`}
+            {msg.cache && " · guardada"}
           </p>
         )}
 

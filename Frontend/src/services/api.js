@@ -10,8 +10,10 @@
 import axios from "axios";
 import { supabase } from "../lib/supabaseClient";
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+
 const apiClient = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || "http://localhost:8000",
+  baseURL: API_BASE_URL,
   headers: {
     "Content-Type": "application/json",
   },
@@ -61,6 +63,76 @@ export const sendChatQuery = (prompt, modelName, similarityTopK = 5) =>
     ...(modelName ? { model_name: modelName } : {}),
     similarity_top_k: similarityTopK,
   });
+
+/**
+ * Consulta RAG con la respuesta en streaming: el texto llega por partes.
+ * Usa fetch en vez de axios porque axios no entrega la respuesta a trozos en
+ * el navegador. El backend manda una línea JSON por evento (meta, delta,
+ * done o error) y cada una se pasa a onEvent.
+ * @param {string} prompt - Pregunta del usuario
+ * @param {string} modelName - ID del modelo (vacío = el del backend)
+ * @param {(evento: object) => void} onEvent - Recibe cada evento
+ * @param {AbortSignal} [signal] - Para cancelar la consulta
+ */
+export async function streamChatQuery(prompt, modelName, onEvent, signal) {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE_URL}/api/v1/chat/query/stream`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+      body: JSON.stringify({
+        prompt,
+        ...(modelName ? { model_name: modelName } : {}),
+        similarity_top_k: 5,
+      }),
+      signal,
+    });
+  } catch (err) {
+    if (err.name === "AbortError") throw err;
+    throw new Error("No se pudo conectar con el servidor. Revisa que el backend esté encendido.");
+  }
+
+  if (res.status === 401) {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
+    throw new Error("Tu sesión expiró.");
+  }
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json()).detail;
+    } catch {
+      /* respuesta sin JSON (por ejemplo, el proxy sin backend) */
+    }
+    if (!detail && res.status >= 502) {
+      detail = "No se pudo conectar con el servidor. Revisa que el backend esté encendido.";
+    }
+    throw new Error(detail || `Error ${res.status} al procesar la consulta.`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let salto;
+    while ((salto = buffer.indexOf("\n")) >= 0) {
+      const linea = buffer.slice(0, salto).trim();
+      buffer = buffer.slice(salto + 1);
+      if (linea) onEvent(JSON.parse(linea));
+    }
+  }
+  if (buffer.trim()) onEvent(JSON.parse(buffer));
+}
 
 /**
  * Historial de consultas del usuario autenticado.
