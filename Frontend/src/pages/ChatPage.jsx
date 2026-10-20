@@ -44,6 +44,7 @@ export default function ChatPage() {
   const [showHistory, setShowHistory] = useState(false);
   const [history, setHistory] = useState([]);
   const [historyState, setHistoryState] = useState("idle"); // idle | loading | ok | error
+  const [historyError, setHistoryError] = useState("");
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -68,7 +69,14 @@ export default function ChatPage() {
       const res = await getChatHistory(30);
       setHistory(res.data.consultas ?? []);
       setHistoryState("ok");
-    } catch {
+    } catch (err) {
+      // Sin respuesta o 502/503/504 del proxy de Vite: el backend no está encendido
+      const sinServidor = !err.response || [502, 503, 504].includes(err.response.status);
+      setHistoryError(
+        sinServidor
+          ? "No se pudo conectar con el servidor. Revisa que el backend esté encendido."
+          : err.response.data?.detail ?? "No se pudo cargar el historial."
+      );
       setHistoryState("error");
     }
   }, []);
@@ -286,7 +294,7 @@ export default function ChatPage() {
           <div style={styles.historyList}>
             {historyState === "loading" && <p style={styles.historyEmpty}>Cargando...</p>}
             {historyState === "error" && (
-              <p style={styles.historyEmpty}>No se pudo cargar el historial. Revisa que exista la tabla consulta en Supabase.</p>
+              <p style={styles.historyEmpty}>{historyError}</p>
             )}
             {historyState === "ok" && history.length === 0 && (
               <p style={styles.historyEmpty}>Todavía no tienes consultas guardadas.</p>
