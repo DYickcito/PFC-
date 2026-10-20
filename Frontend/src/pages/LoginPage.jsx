@@ -119,7 +119,7 @@ export default function LoginPage() {
                     style={styles.input}
                     name="nombre"
                     type="text"
-                    placeholder="Juan"
+                    placeholder="Tu nombre"
                     value={form.nombre}
                     onChange={handleChange}
                     required
@@ -133,7 +133,7 @@ export default function LoginPage() {
                     style={styles.input}
                     name="apellido"
                     type="text"
-                    placeholder="Pérez"
+                    placeholder="Tu apellido"
                     value={form.apellido}
                     onChange={handleChange}
                     required
@@ -168,7 +168,7 @@ export default function LoginPage() {
                   style={{ ...styles.input, paddingRight: 40, flex: 1 }}
                   name="password"
                   type={showPass ? "text" : "password"}
-                  placeholder={mode === "register" ? "Mínimo 6 caracteres" : "••••••••"}
+                  placeholder={mode === "register" ? "contraseña" : "••••••••"}
                   value={form.password}
                   onChange={handleChange}
                   required

@@ -32,8 +32,10 @@ class Settings(BaseSettings):
     # --- Enrutamiento por similitud ---
     # Puntaje coseno mínimo para usar un fragmento como contexto.
     # Si ningún fragmento lo alcanza, se responde con conocimiento general.
-    # Se calibra con las pruebas (el chat devuelve max_score de cada consulta).
-    similarity_threshold: float = 0.6
+    # Calibrado con las 28 preguntas del plan de pruebas (19/10/2026): la pregunta
+    # del dominio con menor score obtuvo 0.596; con 0.58 todas usan documentos.
+    # Se puede sobrescribir con SIMILARITY_THRESHOLD en el .env.
+    similarity_threshold: float = 0.58
 
     # --- Groq LLM ---
     groq_api_key: str

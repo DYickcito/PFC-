@@ -11,7 +11,9 @@ Gestiona:
 """
 import asyncio
 import csv
+import json
 import logging
+import math
 import re
 import time
 import unicodedata
@@ -49,20 +51,23 @@ BATCH_DELAY_SEC = 12.0
 # Es la única fuente de verdad: el router y el frontend leen de aquí.
 # extra_kwargs se pasa al cliente de Groq; los parámetros propios de Groq
 # van dentro de extra_body porque el cliente openai no los acepta sueltos.
-#   - Qwen 3.6 tiene modo de razonamiento; "hidden" evita que el texto
-#     de razonamiento (<think>...</think>) aparezca en la respuesta.
+# Qwen 3.6 27B se retiró del catálogo porque no respondía en las pruebas.
 # ─────────────────────────────────────────────
+#
+# context_window: tamaño real de contexto del modelo. Si no se indica,
+# LlamaIndex asume 3 900 tokens y, al restar la reserva de salida, parte los
+# fragmentos en varias llamadas al LLM (más tokens y más errores 429).
+# reasoning_effort "low": GPT-OSS razona menos antes de responder; para
+# preguntas sobre documentos basta y se gastan menos tokens de salida.
 LLM_MODELS = {
-    "qwen/qwen3.6-27b": {
-        "label": "Qwen 3.6 27B (Groq)",
-        "extra_kwargs": {"extra_body": {"reasoning_format": "hidden"}},
-    },
     "openai/gpt-oss-20b": {
         "label": "GPT-OSS 20B (Groq)",
-        "extra_kwargs": {},
+        "context_window": 131072,
+        "extra_kwargs": {"extra_body": {"reasoning_effort": "low"}},
     },
 }
-DEFAULT_MODEL = "qwen/qwen3.6-27b"
+MAX_OUTPUT_TOKENS = 1024
+DEFAULT_MODEL = "openai/gpt-oss-20b"
 ALLOWED_MODELS = set(LLM_MODELS)
 
 # ─────────────────────────────────────────────
@@ -136,44 +141,68 @@ _MULTI_SPACE = re.compile(r"[ \t ]{2,}")
 _MULTI_NEWLINE = re.compile(r"\n{3,}")
 
 
+_BORDE = 2  # líneas al inicio y al final de cada página donde se buscan encabezados y pies
+
+
+def _normalizar(texto: str) -> str:
+    texto = unicodedata.normalize("NFKC", texto)
+    texto = _CONTROL_CHARS.sub("", texto)
+    return texto.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _indices_borde(lineas: List[str]) -> List[int]:
+    """Índices de las primeras y últimas líneas con texto de una página."""
+    con_texto = [i for i, ln in enumerate(lineas) if ln.strip()]
+    return sorted(set(con_texto[:_BORDE] + con_texto[-_BORDE:]))
+
+
 def _repeated_page_lines(pages: List[str]) -> set:
     """
-    Detecta encabezados y pies de página: líneas cortas que se repiten en
-    al menos la mitad de las páginas de un PDF (mínimo 3 páginas).
+    Detecta encabezados y pies de página: líneas cortas que aparecen en el borde
+    (primeras o últimas líneas) de al menos el 60 % de las páginas de un PDF.
+    Solo se miran los bordes para no borrar contenido que se repite dentro del
+    texto, como celdas de tablas o nombres de cursos.
     """
-    if len(pages) < 3:
+    if len(pages) < 2:
         return set()
     counts = Counter()
     for page in pages:
-        lines = {ln.strip() for ln in page.splitlines() if 0 < len(ln.strip()) <= 100}
-        counts.update(lines)
-    limit = max(2, len(pages) // 2)
-    return {line for line, n in counts.items() if n >= limit}
+        lineas = page.split("\n")
+        bordes = {lineas[i].strip() for i in _indices_borde(lineas) if len(lineas[i].strip()) <= 100}
+        counts.update(bordes)
+    limite = max(2, math.ceil(0.6 * len(pages)))
+    return {linea for linea, n in counts.items() if n >= limite}
+
+
+def _limpiar_bordes(page: str, repetidas: set) -> str:
+    """Quita de los bordes de una página los encabezados repetidos y los números de página."""
+    lineas = page.split("\n")
+    quitar = {
+        i for i in _indices_borde(lineas)
+        if lineas[i].strip() in repetidas or _PAGE_NUMBER.match(lineas[i].strip())
+    }
+    return "\n".join(ln for i, ln in enumerate(lineas) if i not in quitar)
 
 
 def clean_text(text: str, pages: Optional[List[str]] = None) -> str:
     """
     Limpia el texto extraído antes de segmentarlo:
       1. Normaliza unicode (NFKC) y elimina caracteres de control o invisibles.
-      2. Quita encabezados/pies repetidos y números de página (solo PDF).
+      2. Solo en PDF: quita encabezados y pies repetidos y números de página,
+         buscándolos únicamente en las primeras y últimas líneas de cada página
+         (así no se borran números ni textos repetidos dentro de las tablas).
       3. Une palabras cortadas con guion al final de línea.
       4. Colapsa espacios repetidos y saltos de línea excesivos.
+    Si se pasan las páginas, el texto se reconstruye a partir de ellas.
     """
-    text = unicodedata.normalize("NFKC", text)
-    text = _CONTROL_CHARS.sub("", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    if pages:
+        paginas = [_normalizar(p) for p in pages]
+        repetidas = _repeated_page_lines(paginas)
+        text = "\n\n".join(_limpiar_bordes(p, repetidas) for p in paginas)
+    else:
+        text = _normalizar(text)
 
-    repeated = _repeated_page_lines(pages) if pages else set()
-    lines = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if stripped in repeated:
-            continue
-        if pages and _PAGE_NUMBER.match(stripped):
-            continue
-        lines.append(line.rstrip())
-    text = "\n".join(lines)
-
+    text = "\n".join(ln.rstrip() for ln in text.split("\n"))
     text = _HYPHEN_BREAK.sub(r"\1\2", text)
     text = _MULTI_SPACE.sub(" ", text)
     text = _MULTI_NEWLINE.sub("\n\n", text)
@@ -339,6 +368,46 @@ async def ingest_document(
     return indexed_count
 
 
+def update_document_metadata(document_id: str, cambios: dict) -> int:
+    """
+    Actualiza metadatos (por ejemplo nombre_documento o id_carrera) en todos los
+    fragmentos de un documento en Qdrant. LlamaIndex guarda los metadatos dos
+    veces: como campos sueltos del payload y dentro de _node_content, que es de
+    donde reconstruye las fuentes citadas; por eso se actualizan ambos.
+    Retorna la cantidad de fragmentos actualizados.
+    """
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    filtro = Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))])
+    actualizados = 0
+    offset = None
+    while True:
+        puntos, offset = qdrant_client.scroll(
+            collection_name=settings.qdrant_collection_name,
+            scroll_filter=filtro,
+            with_payload=True,
+            with_vectors=False,
+            limit=256,
+            offset=offset,
+        )
+        for punto in puntos:
+            payload = dict(cambios)
+            contenido = punto.payload.get("_node_content")
+            if contenido:
+                nodo = json.loads(contenido)
+                nodo.setdefault("metadata", {}).update(cambios)
+                payload["_node_content"] = json.dumps(nodo)
+            qdrant_client.set_payload(
+                collection_name=settings.qdrant_collection_name,
+                payload=payload,
+                points=[punto.id],
+            )
+            actualizados += 1
+        if offset is None:
+            break
+    return actualizados
+
+
 def delete_document_vectors(document_id: str) -> None:
     """Elimina de Qdrant los vectores de un documento (útil si la ingesta falla a medias)."""
     _get_vector_store().delete(ref_doc_id=document_id)
@@ -354,12 +423,14 @@ def _build_groq_llm(model_name: str) -> Groq:
             f"Modelo '{model_name}' no permitido. "
             f"Opciones válidas: {sorted(ALLOWED_MODELS)}"
         )
+    info = LLM_MODELS[model_name]
     return Groq(
         model=model_name,
         api_key=settings.groq_api_key,
         temperature=0.2,
-        max_tokens=2048,
-        additional_kwargs=LLM_MODELS[model_name]["extra_kwargs"],
+        max_tokens=MAX_OUTPUT_TOKENS,
+        context_window=info.get("context_window", 8192),
+        additional_kwargs=info["extra_kwargs"],
     )
 
 
@@ -395,6 +466,11 @@ def route_by_similarity(nodes: List[NodeWithScore], threshold: float):
 # ─────────────────────────────────────────────
 _CATALOGO_TTL_SEC = 60
 _catalogo_cache = {"momento": 0.0, "texto": ""}
+
+
+def invalidar_catalogo() -> None:
+    """Fuerza a releer el catálogo en la próxima consulta (tras subir, editar o eliminar)."""
+    _catalogo_cache["momento"] = 0.0
 
 
 def catalogo_documentos() -> str:

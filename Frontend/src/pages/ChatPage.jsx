@@ -11,12 +11,14 @@
  *  - Panel de fuentes citadas en cada respuesta
  *  - Indicador de origen: documentos oficiales o conocimiento general
  *    (según el enrutamiento por puntaje de similitud del backend)
+ *  - Panel de historial con las consultas anteriores del usuario
+ *    (tabla `consulta` de Supabase, vía GET /api/v1/chat/history)
  */
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info } from "lucide-react";
-import { sendChatQuery, getAvailableModels } from "../services/api";
+import { Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info, History, X, MessageSquarePlus } from "lucide-react";
+import { sendChatQuery, getAvailableModels, getChatHistory } from "../services/api";
 
 /* ── Mensaje de bienvenida ── */
 const WELCOME = {
@@ -27,6 +29,11 @@ const WELCOME = {
   sources: [],
 };
 
+function formatFecha(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("es-PE", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
 export default function ChatPage() {
   const [messages, setMessages] = useState([WELCOME]);
   const [input, setInput] = useState("");
@@ -34,6 +41,9 @@ export default function ChatPage() {
   const [models, setModels] = useState([]);
   const [selectedModel, setSelectedModel] = useState("");
   const [expandedSources, setExpandedSources] = useState({});
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyState, setHistoryState] = useState("idle"); // idle | loading | ok | error
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -50,6 +60,46 @@ export default function ChatPage() {
         setModels([]);
       });
   }, []);
+
+  /* Historial de consultas del usuario */
+  const loadHistory = useCallback(async () => {
+    setHistoryState((prev) => (prev === "ok" ? "ok" : "loading"));
+    try {
+      const res = await getChatHistory(30);
+      setHistory(res.data.consultas ?? []);
+      setHistoryState("ok");
+    } catch {
+      setHistoryState("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showHistory) loadHistory();
+  }, [showHistory, loadHistory]);
+
+  /* Mostrar en el chat una consulta anterior */
+  function openFromHistory(c) {
+    setMessages((prev) => [
+      ...prev,
+      { id: `h-${c.id}-q`, role: "user", content: c.pregunta, fromHistory: c.fecha },
+      {
+        id: `h-${c.id}-a`,
+        role: "assistant",
+        content: c.respuesta,
+        sources: [],
+        model: c.modelo,
+        usoContexto: c.uso_contexto,
+        tiempoMs: c.tiempo_ms,
+        fromHistory: c.fecha,
+      },
+    ]);
+  }
+
+  function newConversation() {
+    setMessages([WELCOME]);
+    setExpandedSources({});
+    inputRef.current?.focus();
+  }
 
   /* Auto-scroll al último mensaje */
   useEffect(() => {
@@ -80,6 +130,8 @@ export default function ChatPage() {
         tiempoMs: data.tiempo_ms,
       };
       setMessages((prev) => [...prev, assistantMsg]);
+      // El backend guarda la consulta en segundo plano; se refresca el panel poco después
+      if (showHistory) setTimeout(loadHistory, 1500);
     } catch (err) {
       const detail = err.response?.data?.detail ?? "Error al conectar con el servidor.";
       setMessages((prev) => [
@@ -126,6 +178,25 @@ export default function ChatPage() {
           </div>
         </div>
 
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          type="button"
+          style={styles.headerBtn}
+          onClick={newConversation}
+          disabled={loading}
+          title="Limpiar el chat y empezar una conversación nueva"
+        >
+          <MessageSquarePlus size={13} /> Nueva
+        </button>
+        <button
+          type="button"
+          style={{ ...styles.headerBtn, ...(showHistory ? styles.headerBtnActive : {}) }}
+          onClick={() => setShowHistory((v) => !v)}
+          title="Ver tus consultas anteriores"
+        >
+          <History size={13} /> Historial
+        </button>
+
         {/* Selector de modelo */}
         <div style={styles.modelSelector}>
           <Sparkles size={12} color="var(--accent)" />
@@ -141,8 +212,11 @@ export default function ChatPage() {
             ))}
           </select>
         </div>
+        </div>
       </div>
 
+      <div style={styles.body}>
+      <div style={styles.chatCol}>
       {/* ── Área de mensajes ── */}
       <div style={styles.messages}>
         {messages.map((msg) => (
@@ -198,6 +272,40 @@ export default function ChatPage() {
           Shift + Enter para nueva línea · Respuestas basadas en documentos indexados
         </p>
       </div>
+      </div>
+
+      {/* ── Panel de historial ── */}
+      {showHistory && (
+        <aside style={styles.historyPanel}>
+          <div style={styles.historyHeader}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-h)" }}>Tus consultas anteriores</span>
+            <button type="button" style={styles.iconBtn} onClick={() => setShowHistory(false)} title="Cerrar historial">
+              <X size={14} />
+            </button>
+          </div>
+          <div style={styles.historyList}>
+            {historyState === "loading" && <p style={styles.historyEmpty}>Cargando...</p>}
+            {historyState === "error" && (
+              <p style={styles.historyEmpty}>No se pudo cargar el historial. Revisa que exista la tabla consulta en Supabase.</p>
+            )}
+            {historyState === "ok" && history.length === 0 && (
+              <p style={styles.historyEmpty}>Todavía no tienes consultas guardadas.</p>
+            )}
+            {historyState === "ok" && history.map((c) => (
+              <button key={c.id} type="button" style={styles.historyItem} onClick={() => openFromHistory(c)} title="Mostrar esta consulta en el chat">
+                <span style={styles.historyQuestion}>{c.pregunta}</span>
+                <span style={styles.historyMeta}>
+                  <span style={{ color: c.uso_contexto ? "var(--success)" : "var(--warning)", fontWeight: 600 }}>
+                    {c.uso_contexto ? "Documentos" : "General"}
+                  </span>
+                  {" · "}{formatFecha(c.fecha)}
+                </span>
+              </button>
+            ))}
+          </div>
+        </aside>
+      )}
+      </div>
 
       {/* Keyframes para spinner y dots */}
       <style>{`
@@ -247,6 +355,13 @@ function MessageBubble({ msg, expanded, onToggleSources }) {
         {msg.usoContexto === false && (
           <p style={{ ...styles.originTag, ...styles.originGeneral }}>
             <Info size={11} /> Sin información en los documentos cargados
+          </p>
+        )}
+
+        {/* Consulta recuperada del historial */}
+        {msg.fromHistory && (
+          <p style={{ ...styles.modelLabel, marginRight: 6 }}>
+            <History size={10} /> Del historial · {formatFecha(msg.fromHistory)}
           </p>
         )}
 
@@ -340,6 +455,105 @@ const styles = {
     fontWeight: 500,
     cursor: "pointer",
     outline: "none",
+  },
+
+  /* Botones del encabezado */
+  headerBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "6px 10px",
+    borderRadius: 8,
+    border: "1px solid var(--border)",
+    background: "var(--bg)",
+    color: "var(--text-h)",
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  headerBtnActive: {
+    borderColor: "var(--accent)",
+    background: "var(--accent-light)",
+    color: "var(--accent)",
+  },
+  iconBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+    border: "1px solid var(--border)",
+    background: "transparent",
+    color: "var(--text)",
+    cursor: "pointer",
+  },
+
+  /* Cuerpo: chat + panel de historial */
+  body: {
+    flex: 1,
+    display: "flex",
+    minHeight: 0,
+  },
+  chatCol: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    minWidth: 0,
+    minHeight: 0,
+  },
+  historyPanel: {
+    width: 300,
+    flexShrink: 0,
+    display: "flex",
+    flexDirection: "column",
+    borderLeft: "1px solid var(--border)",
+    background: "var(--bg-card)",
+    minHeight: 0,
+  },
+  historyHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "12px 14px",
+    borderBottom: "1px solid var(--border)",
+  },
+  historyList: {
+    flex: 1,
+    overflowY: "auto",
+    padding: 8,
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  historyEmpty: {
+    fontSize: 12,
+    color: "var(--text-muted)",
+    textAlign: "center",
+    padding: "20px 10px",
+  },
+  historyItem: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    textAlign: "left",
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: "1px solid var(--border)",
+    background: "var(--bg)",
+    cursor: "pointer",
+  },
+  historyQuestion: {
+    fontSize: 12,
+    color: "var(--text-h)",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
+  },
+  historyMeta: {
+    fontSize: 10,
+    color: "var(--text-muted)",
   },
 
   /* Mensajes */

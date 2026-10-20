@@ -7,6 +7,10 @@
  * Columna derecha:   historial de documentos subidos con búsqueda y filtros
  * Pie de página:     contadores de estado (indexados / en proceso / con error)
  *
+ * En el historial, cada documento se puede editar (nombre, descripción y carrera),
+ * reemplazar por una versión nueva (la anterior se elimina cuando la nueva termina
+ * de indexarse), descargar o eliminar.
+ *
  * Se pueden seleccionar varios archivos a la vez. Cada uno se sube por separado
  * y el backend los indexa de a uno, en segundo plano; aquí se consulta el estado
  * de cada documento cada pocos segundos y se muestra en la cola de indexación.
@@ -22,9 +26,12 @@ import {
   AlertCircle,
   FileUp,
   X,
+  RefreshCw,
+  Trash2,
+  Pencil,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
-import { uploadDocument, getIngestStatus, getIngestJobs } from "../services/api";
+import { uploadDocument, replaceDocument, deleteDocument, downloadDocument, updateDocument, getIngestStatus, getIngestJobs } from "../services/api";
 
 const POLL_MS = 4000;
 
@@ -110,7 +117,14 @@ export default function IngestPage() {
   const [loadingDocs, setLoadingDocs] = useState(false);
 
   /* ── Estado de indexaciones en segundo plano ── */
-  const [jobs, setJobs] = useState([]); // [{ id, nombre, estado, nodes, duracion, error }]
+  const [jobs, setJobs] = useState([]); // [{ id, nombre, estado, nodes, duracion, error, reemplaza, aviso }]
+
+  /* ── Gestión de documentos del historial ── */
+  const [confirmDelete, setConfirmDelete] = useState(null); // id del documento a confirmar
+  const [busyDoc, setBusyDoc] = useState(null); // id del documento con una acción en curso
+  const replaceInputRef = useRef();
+  const replaceTarget = useRef(null);
+  const [editing, setEditing] = useState(null); // { id, nombre, descripcion, id_carrera }
   const [jobsSummary, setJobsSummary] = useState({ en_cola: 0, procesando: 0, errores: 0 });
 
   /* ── Cargar carreras desde Supabase ── */
@@ -132,7 +146,7 @@ export default function IngestPage() {
     const { data } = await supabase
       .from("documento")
       .select(`
-        id, nombre_documento, descripcion, ruta_archivo, fecha_carga,
+        id, nombre_documento, descripcion, ruta_archivo, fecha_carga, id_carrera,
         estado ( nombre_estado ),
         carrera ( nombre_carrera ),
         tipo_documento ( nombre_tipo )
@@ -168,7 +182,7 @@ export default function IngestPage() {
         try {
           const { data } = await getIngestStatus(job.id);
           if (data.estado !== job.estado) {
-            updates[job.id] = { estado: data.estado, nodes: data.nodes_indexed, duracion: data.duracion_s, error: data.error };
+            updates[job.id] = { estado: data.estado, nodes: data.nodes_indexed, duracion: data.duracion_s, error: data.error, aviso: data.aviso };
             if (!EN_CURSO.includes(data.estado)) terminoAlguno = true;
           }
         } catch {
@@ -270,24 +284,132 @@ export default function IngestPage() {
     fetchJobs();
   }
 
+  /* ── Reemplazar un documento por una versión nueva ── */
+  function startReplace(doc) {
+    replaceTarget.current = doc;
+    setConfirmDelete(null);
+    replaceInputRef.current?.click();
+  }
+
+  async function onReplaceFile(e) {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    const doc = replaceTarget.current;
+    if (!f || !doc) return;
+    if (!ACCEPTED_MIME.includes(f.type)) {
+      setUploadMsg({ type: "error", text: `Tipo no permitido. Usa: ${ACCEPTED_EXTS.join(", ")}` });
+      return;
+    }
+    if (f.size > MAX_MB * 1024 * 1024) {
+      setUploadMsg({ type: "error", text: `El archivo supera los ${MAX_MB} MB.` });
+      return;
+    }
+    const fd = new FormData();
+    fd.append("file", f);
+    setBusyDoc(doc.id);
+    try {
+      const res = await replaceDocument(doc.id, fd);
+      setJobs((prev) => [{ id: res.data.document_id, nombre: res.data.nombre_documento, estado: res.data.estado ?? "en_cola", reemplaza: doc.id }, ...prev]);
+      setUploadMsg({
+        type: "info",
+        text: `Nueva versión de "${doc.nombre_documento}" recibida. La anterior sigue respondiendo consultas hasta que la nueva termine de indexarse.`,
+      });
+      fetchJobs();
+    } catch (err) {
+      setUploadMsg({ type: "error", text: `No se pudo reemplazar "${doc.nombre_documento}": ${err.response?.data?.detail ?? err.message}` });
+    } finally {
+      setBusyDoc(null);
+    }
+  }
+
+  /* ── Editar nombre, descripción y carrera ── */
+  function startEdit(doc) {
+    setConfirmDelete(null);
+    setEditing({
+      id: doc.id,
+      nombre: doc.nombre_documento ?? "",
+      descripcion: doc.descripcion ?? "",
+      id_carrera: String(doc.id_carrera ?? ""),
+    });
+  }
+
+  async function saveEdit(doc) {
+    const nombreNuevo = editing.nombre.trim();
+    if (!nombreNuevo) { setUploadMsg({ type: "error", text: "El nombre del documento no puede quedar vacío." }); return; }
+    const cambios = {};
+    if (nombreNuevo !== doc.nombre_documento) cambios.nombre_documento = nombreNuevo;
+    if (editing.descripcion.trim() !== (doc.descripcion ?? "")) cambios.descripcion = editing.descripcion.trim();
+    if (editing.id_carrera && editing.id_carrera !== String(doc.id_carrera ?? "")) cambios.id_carrera = Number(editing.id_carrera);
+    if (Object.keys(cambios).length === 0) { setEditing(null); return; }
+
+    setBusyDoc(doc.id);
+    try {
+      const res = await updateDocument(doc.id, cambios);
+      setEditing(null);
+      setUploadMsg(
+        res.data.aviso
+          ? { type: "info", text: res.data.aviso }
+          : { type: "success", text: `"${nombreNuevo}" actualizado.` }
+      );
+      fetchDocumentos();
+    } catch (err) {
+      setUploadMsg({ type: "error", text: `No se pudo actualizar "${doc.nombre_documento}": ${err.response?.data?.detail ?? err.message}` });
+    } finally {
+      setBusyDoc(null);
+    }
+  }
+
+  /* ── Eliminar un documento ── */
+  async function handleDelete(doc) {
+    setBusyDoc(doc.id);
+    try {
+      await deleteDocument(doc.id);
+      setConfirmDelete(null);
+      setUploadMsg({ type: "success", text: `"${doc.nombre_documento}" fue eliminado y ya no se usa en las respuestas.` });
+      fetchDocumentos();
+    } catch (err) {
+      setUploadMsg({ type: "error", text: `No se pudo eliminar "${doc.nombre_documento}": ${err.response?.data?.detail ?? err.message}` });
+    } finally {
+      setBusyDoc(null);
+    }
+  }
+
   /* ── Filtrado del historial ── */
   const filtered = documentos.filter((d) => {
     const matchSearch =
       d.nombre_documento?.toLowerCase().includes(search.toLowerCase()) ||
       d.tipo_documento?.nombre_tipo?.toLowerCase().includes(search.toLowerCase());
     const matchCarrera =
-      filterCarrera === "all" || String(d.carrera?.id ?? "") === filterCarrera;
+      filterCarrera === "all" || String(d.id_carrera ?? "") === filterCarrera;
     return matchSearch && matchCarrera;
   });
 
   /* ── Contadores ── */
   const totalIndexed = documentos.filter((d) => d.estado?.nombre_estado === "subido").length;
 
-  /* ── Descarga de documento ── */
-  function handleDownload(doc) {
-    // Si la ruta es local, no podemos descargar directamente desde el browser.
-    // Informamos al usuario. (En producción, esto sería un endpoint de descarga.)
-    alert(`Ruta del archivo:\n${doc.ruta_archivo}\n\nEn producción este botón llama a un endpoint de descarga segura.`);
+  /* ── Descarga del archivo original ── */
+  async function handleDownload(doc) {
+    setBusyDoc(doc.id);
+    try {
+      const res = await downloadDocument(doc.id);
+      const ext = (doc.ruta_archivo ?? "").match(/\.[^.\\/]+$/)?.[0] ?? "";
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      const nombre = doc.nombre_documento ?? "documento";
+      a.download = nombre.toLowerCase().endsWith(ext.toLowerCase()) ? nombre : `${nombre}${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      // Con responseType "blob", el detalle del error también llega como blob
+      let detail = err.message;
+      try { detail = JSON.parse(await err.response.data.text()).detail ?? detail; } catch { /* sin detalle */ }
+      setUploadMsg({ type: "error", text: `No se pudo descargar "${doc.nombre_documento}": ${detail}` });
+    } finally {
+      setBusyDoc(null);
+    }
   }
 
   /* ── Render ── */
@@ -460,9 +582,11 @@ export default function IngestPage() {
                 <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text-h)" }} title={j.nombre}>
                   {j.nombre}
                 </span>
-                <span style={{ fontSize: 11, color: j.estado === "error" ? "var(--danger)" : "var(--text-muted)", whiteSpace: "nowrap" }}>
+                <span style={{ fontSize: 11, color: j.estado === "error" || j.aviso ? "var(--danger)" : "var(--text-muted)", whiteSpace: "nowrap" }} title={j.aviso ?? j.error ?? ""}>
+                  {j.reemplaza && j.estado !== "error" && "Reemplazo · "}
                   {j.estado === "indexado" && `${j.nodes} fragmentos · ${j.duracion} s`}
                   {j.estado === "error" && (j.error ?? "").slice(0, 60)}
+                  {j.aviso && " · revisar versión anterior"}
                 </span>
                 <JobBadge estado={j.estado} />
               </div>
@@ -486,6 +610,15 @@ export default function IngestPage() {
           </div>
         </div>
       </div>
+
+      {/* Selector de archivo para reemplazar un documento del historial */}
+      <input
+        ref={replaceInputRef}
+        type="file"
+        accept={ACCEPTED_MIME.join(",")}
+        style={{ display: "none" }}
+        onChange={onReplaceFile}
+      />
 
       {/* ══ Columna derecha — Historial ══ */}
       <aside style={styles.sidebar}>
@@ -537,6 +670,46 @@ export default function IngestPage() {
                   <FileText size={18} color="var(--accent)" />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
+                  {editing?.id === doc.id ? (
+                    <div style={styles.editBox}>
+                      <label style={styles.editLabel}>Nombre</label>
+                      <input
+                        style={styles.editInput}
+                        value={editing.nombre}
+                        onChange={(e) => setEditing({ ...editing, nombre: e.target.value })}
+                        disabled={busyDoc === doc.id}
+                      />
+                      <label style={styles.editLabel}>Carrera</label>
+                      <select
+                        style={styles.editInput}
+                        value={editing.id_carrera}
+                        onChange={(e) => setEditing({ ...editing, id_carrera: e.target.value })}
+                        disabled={busyDoc === doc.id}
+                      >
+                        {!editing.id_carrera && <option value="">Sin asignar</option>}
+                        {carreras.map((c) => (
+                          <option key={c.id} value={String(c.id)}>{c.nombre_carrera}</option>
+                        ))}
+                      </select>
+                      <label style={styles.editLabel}>Descripción</label>
+                      <input
+                        style={styles.editInput}
+                        value={editing.descripcion}
+                        placeholder="Breve descripción del contenido"
+                        onChange={(e) => setEditing({ ...editing, descripcion: e.target.value })}
+                        disabled={busyDoc === doc.id}
+                      />
+                      <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                        <button type="button" style={styles.confirmSave} disabled={busyDoc === doc.id} onClick={() => saveEdit(doc)}>
+                          {busyDoc === doc.id ? "Guardando..." : "Guardar"}
+                        </button>
+                        <button type="button" style={styles.confirmCancel} disabled={busyDoc === doc.id} onClick={() => setEditing(null)}>
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                  <>
                   <p style={styles.docName} title={doc.nombre_documento}>
                     {doc.nombre_documento}
                   </p>
@@ -550,16 +723,61 @@ export default function IngestPage() {
                     {EN_CURSO.includes(jobs.find((j) => j.id === doc.id)?.estado)
                       ? <JobBadge estado={jobs.find((j) => j.id === doc.id).estado} />
                       : <StatusBadge estadoNombre={doc.estado?.nombre_estado ?? "subido"} />}
+                    {jobs.some((j) => j.reemplaza === doc.id && EN_CURSO.includes(j.estado)) && (
+                      <span style={{ ...styles.extTag, color: "var(--warning)", background: "var(--warning-bg)" }}>Reemplazándose</span>
+                    )}
                   </div>
                   <p style={styles.docDate}>{formatDate(doc.fecha_carga)}</p>
+                  </>
+                  )}
+                  {confirmDelete === doc.id && (
+                    <div style={styles.confirmBox}>
+                      <span>¿Eliminar este documento? Dejará de usarse en las respuestas.</span>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button type="button" style={styles.confirmDanger} disabled={busyDoc === doc.id} onClick={() => handleDelete(doc)}>
+                          {busyDoc === doc.id ? "Eliminando..." : "Eliminar"}
+                        </button>
+                        <button type="button" style={styles.confirmCancel} disabled={busyDoc === doc.id} onClick={() => setConfirmDelete(null)}>
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <button
-                  style={styles.downloadBtn}
-                  title="Descargar documento"
-                  onClick={() => handleDownload(doc)}
-                >
-                  <Download size={13} />
-                </button>
+                <div style={styles.docActions}>
+                  <button
+                    style={{ ...styles.downloadBtn, ...(editing?.id === doc.id ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+                    title="Editar nombre, carrera y descripción"
+                    disabled={busyDoc === doc.id}
+                    onClick={() => (editing?.id === doc.id ? setEditing(null) : startEdit(doc))}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    style={styles.downloadBtn}
+                    title="Reemplazar por una versión nueva"
+                    disabled={busyDoc === doc.id}
+                    onClick={() => startReplace(doc)}
+                  >
+                    <RefreshCw size={13} />
+                  </button>
+                  <button
+                    style={{ ...styles.downloadBtn, color: "var(--danger)" }}
+                    title="Eliminar documento"
+                    disabled={busyDoc === doc.id}
+                    onClick={() => setConfirmDelete(confirmDelete === doc.id ? null : doc.id)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                  <button
+                    style={styles.downloadBtn}
+                    title="Descargar el archivo original"
+                    disabled={busyDoc === doc.id}
+                    onClick={() => handleDownload(doc)}
+                  >
+                    <Download size={13} />
+                  </button>
+                </div>
               </div>
             ))
           )}
@@ -856,6 +1074,76 @@ const styles = {
   docDate: {
     fontSize: 10,
     color: "var(--text-muted)",
+  },
+  docActions: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    flexShrink: 0,
+  },
+  confirmBox: {
+    marginTop: 8,
+    padding: "8px 10px",
+    borderRadius: 6,
+    border: "1px solid var(--danger)",
+    background: "var(--danger-bg)",
+    color: "var(--danger)",
+    fontSize: 11,
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  confirmDanger: {
+    padding: "4px 10px",
+    borderRadius: 5,
+    border: "none",
+    background: "var(--danger)",
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  editBox: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+  },
+  editLabel: {
+    fontSize: 10,
+    fontWeight: 600,
+    color: "var(--text-muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.3px",
+  },
+  editInput: {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "5px 8px",
+    borderRadius: 5,
+    border: "1px solid var(--border)",
+    background: "var(--bg)",
+    color: "var(--text-h)",
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  confirmSave: {
+    padding: "4px 10px",
+    borderRadius: 5,
+    border: "none",
+    background: "var(--accent)",
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  confirmCancel: {
+    padding: "4px 10px",
+    borderRadius: 5,
+    border: "1px solid var(--border)",
+    background: "var(--bg-card)",
+    color: "var(--text)",
+    fontSize: 11,
+    cursor: "pointer",
   },
   downloadBtn: {
     flexShrink: 0,

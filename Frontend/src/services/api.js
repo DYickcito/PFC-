@@ -86,7 +86,41 @@ export const uploadDocument = (formData) =>
   });
 
 /**
- * Estado de indexación de un documento (procesando / indexado / error).
+ * Subir una versión nueva de un documento existente.
+ * La anterior se elimina cuando la nueva termina de indexarse.
+ * @param {string} documentId - ID del documento a reemplazar
+ * @param {FormData} formData - Datos con el archivo nuevo (y opcionalmente nombre o descripción)
+ */
+export const replaceDocument = (documentId, formData) =>
+  apiClient.post(`/api/v1/ingest/documents/${documentId}/replace`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+
+/**
+ * Cambiar el nombre, la descripción o la carrera de un documento ya subido.
+ * @param {string} documentId - ID del documento
+ * @param {{nombre_documento?: string, descripcion?: string, id_carrera?: number}} cambios
+ */
+export const updateDocument = (documentId, cambios) =>
+  apiClient.patch(`/api/v1/ingest/documents/${documentId}`, cambios);
+
+/**
+ * Descargar el archivo original de un documento.
+ * Se pide como blob porque el endpoint exige el token de sesión.
+ * @param {string} documentId - ID del documento
+ */
+export const downloadDocument = (documentId) =>
+  apiClient.get(`/api/v1/ingest/documents/${documentId}/download`, { responseType: "blob" });
+
+/**
+ * Eliminar un documento (registro, vectores y archivo).
+ * @param {string} documentId - ID del documento
+ */
+export const deleteDocument = (documentId) =>
+  apiClient.delete(`/api/v1/ingest/documents/${documentId}`);
+
+/**
+ * Estado de indexación de un documento (en cola / procesando / indexado / error).
  * @param {string} documentId - ID devuelto por uploadDocument
  */
 export const getIngestStatus = (documentId) =>
