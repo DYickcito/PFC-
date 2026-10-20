@@ -70,6 +70,22 @@ export const getChatHistory = (limit = 20) =>
   apiClient.get("/api/v1/chat/history", { params: { limit } });
 
 /**
+ * Fijar o desfijar una consulta del historial.
+ * @param {string} consultaId - ID de la consulta
+ * @param {boolean} fijada - true para fijarla arriba
+ */
+export const pinHistoryItem = (consultaId, fijada) =>
+  apiClient.patch(`/api/v1/chat/history/${consultaId}`, { fijada });
+
+/**
+ * Borrar consultas del historial.
+ * @param {{ids?: string[], todas?: boolean}} opciones - ids elegidos, o todas=true
+ *   para borrar todo el historial (las fijadas se conservan)
+ */
+export const deleteHistory = (opciones) =>
+  apiClient.post("/api/v1/chat/history/delete", opciones);
+
+/**
  * Obtener modelos LLM disponibles del backend.
  */
 export const getAvailableModels = () =>

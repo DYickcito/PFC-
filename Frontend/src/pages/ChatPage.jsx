@@ -12,13 +12,17 @@
  *  - Indicador de origen: documentos oficiales o conocimiento general
  *    (según el enrutamiento por puntaje de similitud del backend)
  *  - Panel de historial con las consultas anteriores del usuario
- *    (tabla `consulta` de Supabase, vía GET /api/v1/chat/history)
+ *    (tabla `consulta` de Supabase, vía GET /api/v1/chat/history):
+ *    fijar consultas, borrar las elegidas o todo el historial
  */
 import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info, History, X, MessageSquarePlus } from "lucide-react";
-import { sendChatQuery, getAvailableModels, getChatHistory } from "../services/api";
+import {
+  Send, Bot, User, BookOpen, ChevronDown, ChevronUp, Sparkles, ShieldCheck, Info, History, X,
+  MessageSquarePlus, Pin, PinOff, Trash2, ListChecks, Square, SquareCheck,
+} from "lucide-react";
+import { sendChatQuery, getAvailableModels, getChatHistory, pinHistoryItem, deleteHistory } from "../services/api";
 
 /* ── Mensaje de bienvenida ── */
 const WELCOME = {
@@ -28,6 +32,13 @@ const WELCOME = {
     "¡Hola! Soy la **IA Institucional**. Puedes consultarme sobre los documentos académicos indexados en el sistema. ¿En qué te puedo ayudar?",
   sources: [],
 };
+
+/* Fijadas primero; dentro de cada grupo, de la más reciente a la más antigua */
+function ordenarHistorial(lista) {
+  return [...lista].sort(
+    (a, b) => Number(!!b.fijada) - Number(!!a.fijada) || new Date(b.fecha) - new Date(a.fecha)
+  );
+}
 
 function formatFecha(iso) {
   if (!iso) return "";
@@ -45,6 +56,11 @@ export default function ChatPage() {
   const [history, setHistory] = useState([]);
   const [historyState, setHistoryState] = useState("idle"); // idle | loading | ok | error
   const [historyError, setHistoryError] = useState("");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState({});        // { [id]: true }
+  const [confirmDelete, setConfirmDelete] = useState(null); // null | "seleccion" | "todas"
+  const [historyBusy, setHistoryBusy] = useState(false);
+  const [historyNotice, setHistoryNotice] = useState("");
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -67,7 +83,7 @@ export default function ChatPage() {
     setHistoryState((prev) => (prev === "ok" ? "ok" : "loading"));
     try {
       const res = await getChatHistory(30);
-      setHistory(res.data.consultas ?? []);
+      setHistory(ordenarHistorial(res.data.consultas ?? []));
       setHistoryState("ok");
     } catch (err) {
       // Sin respuesta o 502/503/504 del proxy de Vite: el backend no está encendido
@@ -84,6 +100,63 @@ export default function ChatPage() {
   useEffect(() => {
     if (showHistory) loadHistory();
   }, [showHistory, loadHistory]);
+
+  /* Aviso corto en el panel (se borra solo) */
+  useEffect(() => {
+    if (!historyNotice) return;
+    const t = setTimeout(() => setHistoryNotice(""), 4000);
+    return () => clearTimeout(t);
+  }, [historyNotice]);
+
+  function salirDeSeleccion() {
+    setSelectMode(false);
+    setSelected({});
+    setConfirmDelete(null);
+  }
+
+  function closeHistory() {
+    salirDeSeleccion();
+    setShowHistory(false);
+  }
+
+  function toggleSelected(id) {
+    setSelected((prev) => {
+      const next = { ...prev };
+      if (next[id]) delete next[id];
+      else next[id] = true;
+      return next;
+    });
+  }
+
+  /* Fijar o desfijar: se actualiza al instante y se revierte si el servidor falla */
+  async function togglePin(c) {
+    const fijada = !c.fijada;
+    setHistory((prev) => ordenarHistorial(prev.map((h) => (h.id === c.id ? { ...h, fijada } : h))));
+    try {
+      await pinHistoryItem(c.id, fijada);
+    } catch (err) {
+      setHistory((prev) => ordenarHistorial(prev.map((h) => (h.id === c.id ? { ...h, fijada: !fijada } : h))));
+      setHistoryNotice(err.response?.data?.detail ?? "No se pudo fijar la consulta.");
+    }
+  }
+
+  /* Borrar las consultas elegidas o todo el historial (sin las fijadas) */
+  async function borrarHistorial(modo) {
+    const ids = Object.keys(selected);
+    setHistoryBusy(true);
+    try {
+      const res = await deleteHistory(modo === "todas" ? { todas: true } : { ids });
+      const n = res.data.borradas ?? 0;
+      setHistoryNotice(n === 1 ? "Se borró 1 consulta." : `Se borraron ${n} consultas.`);
+      salirDeSeleccion();
+      await loadHistory();
+    } catch (err) {
+      setHistoryNotice(err.response?.data?.detail ?? "No se pudo borrar el historial.");
+      setConfirmDelete(null);
+    } finally {
+      setHistoryBusy(false);
+    }
+  }
 
   /* Mostrar en el chat una consulta anterior */
   function openFromHistory(c) {
@@ -164,6 +237,10 @@ export default function ChatPage() {
     }
   }
 
+  const selectedCount = Object.keys(selected).length;
+  const allSelected = history.length > 0 && selectedCount === history.length;
+  const pinnedCount = history.filter((h) => h.fijada).length;
+
   function toggleSources(id) {
     setExpandedSources((prev) => ({ ...prev, [id]: !prev[id] }));
   }
@@ -199,7 +276,7 @@ export default function ChatPage() {
         <button
           type="button"
           style={{ ...styles.headerBtn, ...(showHistory ? styles.headerBtnActive : {}) }}
-          onClick={() => setShowHistory((v) => !v)}
+          onClick={() => (showHistory ? closeHistory() : setShowHistory(true))}
           title="Ver tus consultas anteriores"
         >
           <History size={13} /> Historial
@@ -287,11 +364,68 @@ export default function ChatPage() {
         <aside style={styles.historyPanel}>
           <div style={styles.historyHeader}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-h)" }}>Tus consultas anteriores</span>
-            <button type="button" style={styles.iconBtn} onClick={() => setShowHistory(false)} title="Cerrar historial">
-              <X size={14} />
-            </button>
+            <div style={{ display: "flex", gap: 6 }}>
+              {historyState === "ok" && history.length > 0 && !selectMode && (
+                <button type="button" style={styles.iconBtn} onClick={() => setSelectMode(true)} title="Elegir consultas para borrar">
+                  <ListChecks size={14} />
+                </button>
+              )}
+              <button type="button" style={styles.iconBtn} onClick={closeHistory} title="Cerrar historial">
+                <X size={14} />
+              </button>
+            </div>
           </div>
+
+          {/* Barra de selección */}
+          {selectMode && (
+            <div style={styles.selectBar}>
+              {confirmDelete === "seleccion" ? (
+                <>
+                  <span style={styles.selectText}>
+                    ¿Borrar {selectedCount} consulta{selectedCount === 1 ? "" : "s"}?
+                  </span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button type="button" style={styles.dangerBtn} disabled={historyBusy} onClick={() => borrarHistorial("seleccion")}>
+                      {historyBusy ? "Borrando..." : "Borrar"}
+                    </button>
+                    <button type="button" style={styles.smallBtn} disabled={historyBusy} onClick={() => setConfirmDelete(null)}>
+                      No
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    style={styles.linkBtn}
+                    onClick={() =>
+                      setSelected(allSelected ? {} : Object.fromEntries(history.map((h) => [h.id, true])))
+                    }
+                  >
+                    {allSelected ? "Ninguna" : "Todas"}
+                  </button>
+                  <span style={styles.selectText}>{selectedCount} elegida{selectedCount === 1 ? "" : "s"}</span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button
+                      type="button"
+                      style={{ ...styles.dangerBtn, ...(selectedCount === 0 ? styles.btnDisabled : {}) }}
+                      disabled={selectedCount === 0}
+                      onClick={() => setConfirmDelete("seleccion")}
+                      title="Borrar las consultas elegidas"
+                    >
+                      <Trash2 size={12} /> Borrar
+                    </button>
+                    <button type="button" style={styles.smallBtn} onClick={salirDeSeleccion}>
+                      Cancelar
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
           <div style={styles.historyList}>
+            {historyNotice && <p style={styles.historyNotice}>{historyNotice}</p>}
             {historyState === "loading" && <p style={styles.historyEmpty}>Cargando...</p>}
             {historyState === "error" && (
               <p style={styles.historyEmpty}>{historyError}</p>
@@ -299,18 +433,88 @@ export default function ChatPage() {
             {historyState === "ok" && history.length === 0 && (
               <p style={styles.historyEmpty}>Todavía no tienes consultas guardadas.</p>
             )}
-            {historyState === "ok" && history.map((c) => (
-              <button key={c.id} type="button" style={styles.historyItem} onClick={() => openFromHistory(c)} title="Mostrar esta consulta en el chat">
-                <span style={styles.historyQuestion}>{c.pregunta}</span>
-                <span style={styles.historyMeta}>
-                  <span style={{ color: c.uso_contexto ? "var(--success)" : "var(--warning)", fontWeight: 600 }}>
-                    {c.uso_contexto ? "Documentos" : "General"}
-                  </span>
-                  {" · "}{formatFecha(c.fecha)}
-                </span>
-              </button>
-            ))}
+            {historyState === "ok" && history.map((c, i) => {
+              const showPinnedLabel = c.fijada && i === 0;
+              const showRecentLabel = !c.fijada && i > 0 && history[i - 1].fijada;
+              const isSelected = !!selected[c.id];
+              return (
+                <div key={c.id} style={{ display: "contents" }}>
+                  {showPinnedLabel && <p style={styles.historySection}>Fijadas</p>}
+                  {showRecentLabel && <p style={styles.historySection}>Recientes</p>}
+                  <div
+                    style={{
+                      ...styles.historyItem,
+                      ...(c.fijada ? styles.historyItemPinned : {}),
+                      ...(isSelected ? styles.historyItemSelected : {}),
+                    }}
+                  >
+                    <button
+                      type="button"
+                      style={styles.historyMain}
+                      onClick={() => (selectMode ? toggleSelected(c.id) : openFromHistory(c))}
+                      title={selectMode ? "Elegir esta consulta" : "Mostrar esta consulta en el chat"}
+                    >
+                      {selectMode && (
+                        <span style={{ color: isSelected ? "var(--accent)" : "var(--text-muted)", flexShrink: 0, marginTop: 1 }}>
+                          {isSelected ? <SquareCheck size={14} /> : <Square size={14} />}
+                        </span>
+                      )}
+                      <span style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+                        <span style={styles.historyQuestion}>{c.pregunta}</span>
+                        <span style={styles.historyMeta}>
+                          <span style={{ color: c.uso_contexto ? "var(--success)" : "var(--warning)", fontWeight: 600 }}>
+                            {c.uso_contexto ? "Documentos" : "General"}
+                          </span>
+                          {" · "}{formatFecha(c.fecha)}
+                        </span>
+                      </span>
+                    </button>
+                    {!selectMode && (
+                      <button
+                        type="button"
+                        style={{ ...styles.pinBtn, ...(c.fijada ? styles.pinBtnActive : {}) }}
+                        onClick={() => togglePin(c)}
+                        title={c.fijada ? "Quitar de fijadas" : "Fijar arriba"}
+                      >
+                        {c.fijada ? <PinOff size={13} /> : <Pin size={13} />}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
           </div>
+
+          {/* Borrar todo */}
+          {historyState === "ok" && history.length > 0 && !selectMode && (
+            <div style={styles.historyFooter}>
+              {confirmDelete === "todas" ? (
+                <>
+                  <p style={styles.selectText}>
+                    ¿Borrar todo tu historial?{pinnedCount > 0 && " Las consultas fijadas se conservan."}
+                  </p>
+                  <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                    <button type="button" style={styles.dangerBtn} disabled={historyBusy} onClick={() => borrarHistorial("todas")}>
+                      {historyBusy ? "Borrando..." : "Borrar todo"}
+                    </button>
+                    <button type="button" style={styles.smallBtn} disabled={historyBusy} onClick={() => setConfirmDelete(null)}>
+                      Cancelar
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  style={{ ...styles.clearBtn, ...(pinnedCount === history.length ? styles.btnDisabled : {}) }}
+                  disabled={pinnedCount === history.length}
+                  onClick={() => setConfirmDelete("todas")}
+                  title={pinnedCount === history.length ? "Solo quedan consultas fijadas" : "Borrar todas las consultas que no estén fijadas"}
+                >
+                  <Trash2 size={12} /> Borrar historial
+                </button>
+              )}
+            </div>
+          )}
         </aside>
       )}
       </div>
@@ -542,13 +746,128 @@ const styles = {
   },
   historyItem: {
     display: "flex",
-    flexDirection: "column",
+    alignItems: "flex-start",
     gap: 4,
-    textAlign: "left",
-    padding: "8px 10px",
     borderRadius: 8,
     border: "1px solid var(--border)",
     background: "var(--bg)",
+    flexShrink: 0,
+  },
+  historyItemPinned: {
+    borderColor: "var(--accent)",
+  },
+  historyItemSelected: {
+    background: "var(--accent-light)",
+  },
+  historyMain: {
+    flex: 1,
+    minWidth: 0,
+    display: "flex",
+    gap: 8,
+    textAlign: "left",
+    padding: "8px 4px 8px 10px",
+    border: "none",
+    background: "transparent",
+    cursor: "pointer",
+    color: "inherit",
+  },
+  pinBtn: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 26,
+    height: 26,
+    margin: "6px 6px 0 0",
+    borderRadius: 6,
+    border: "none",
+    background: "transparent",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  pinBtnActive: {
+    color: "var(--accent)",
+  },
+  historySection: {
+    fontSize: 10,
+    fontWeight: 700,
+    textTransform: "uppercase",
+    letterSpacing: ".05em",
+    color: "var(--text-muted)",
+    padding: "6px 4px 0",
+  },
+  historyNotice: {
+    fontSize: 11,
+    color: "var(--accent)",
+    background: "var(--accent-light)",
+    borderRadius: 6,
+    padding: "6px 10px",
+    textAlign: "center",
+  },
+  selectBar: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "8px 14px",
+    borderBottom: "1px solid var(--border)",
+  },
+  selectText: {
+    fontSize: 12,
+    color: "var(--text)",
+  },
+  linkBtn: {
+    border: "none",
+    background: "transparent",
+    color: "var(--accent)",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    padding: 0,
+  },
+  smallBtn: {
+    padding: "4px 10px",
+    borderRadius: 6,
+    border: "1px solid var(--border)",
+    background: "transparent",
+    color: "var(--text-h)",
+    fontSize: 12,
+    cursor: "pointer",
+  },
+  dangerBtn: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    padding: "4px 10px",
+    borderRadius: 6,
+    border: "1px solid var(--danger)",
+    background: "var(--danger-bg)",
+    color: "var(--danger)",
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  btnDisabled: {
+    opacity: 0.5,
+    cursor: "not-allowed",
+  },
+  historyFooter: {
+    padding: "10px 14px",
+    borderTop: "1px solid var(--border)",
+  },
+  clearBtn: {
+    width: "100%",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    padding: "6px 10px",
+    borderRadius: 8,
+    border: "1px solid var(--border)",
+    background: "transparent",
+    color: "var(--danger)",
+    fontSize: 12,
+    fontWeight: 500,
     cursor: "pointer",
   },
   historyQuestion: {

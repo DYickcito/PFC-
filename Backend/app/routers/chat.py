@@ -13,10 +13,17 @@ Endpoints:
     - Retorna los modelos LLM disponibles para selección en el frontend
 
   GET /api/v1/chat/history
-    - Retorna las últimas consultas del usuario autenticado
+    - Retorna las últimas consultas del usuario autenticado (las fijadas primero)
+
+  PATCH /api/v1/chat/history/{consulta_id}
+    - Fija o desfija una consulta del historial
+
+  POST /api/v1/chat/history/delete
+    - Borra consultas del historial: las elegidas o todas las no fijadas
 """
 import logging
 import time
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -75,6 +82,19 @@ class ChatResponse(BaseModel):
     max_score: float | None = Field(description="Puntaje del fragmento más parecido.")
     umbral: float = Field(description="Umbral de similitud configurado.")
     tiempo_ms: int = Field(description="Tiempo total de la consulta en milisegundos.")
+
+
+class HistoryPin(BaseModel):
+    fijada: bool
+
+
+class HistoryDelete(BaseModel):
+    ids: list[UUID] = Field(default_factory=list, max_length=100,
+                            description="Consultas a borrar.")
+    todas: bool = Field(default=False,
+                        description="Borrar todo el historial del usuario en vez de las elegidas.")
+    incluir_fijadas: bool = Field(default=False,
+                                  description="Con todas=True, borrar también las fijadas.")
 
 
 # ─────────────────────────────────────────────
@@ -169,8 +189,9 @@ async def get_history(
         result = (
             get_supabase_client()
             .table("consulta")
-            .select("id, pregunta, respuesta, modelo, uso_contexto, score_max, fragmentos, tiempo_ms, fecha")
+            .select("id, pregunta, respuesta, modelo, uso_contexto, score_max, fragmentos, tiempo_ms, fecha, fijada")
             .eq("id_usuario", current_user["user_id"])
+            .order("fijada", desc=True)
             .order("fecha", desc=True)
             .limit(limit)
             .execute()
@@ -181,3 +202,65 @@ async def get_history(
             detail=f"No se pudo leer el historial: {str(e)}",
         )
     return {"consultas": result.data or []}
+
+
+@router.patch("/history/{consulta_id}")
+async def pin_history_item(
+    consulta_id: UUID,
+    body: HistoryPin,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fija o desfija una consulta. Solo afecta consultas del propio usuario."""
+    try:
+        result = (
+            get_supabase_client()
+            .table("consulta")
+            .update({"fijada": body.fijada})
+            .eq("id", str(consulta_id))
+            .eq("id_usuario", current_user["user_id"])
+            .execute()
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"No se pudo actualizar la consulta: {str(e)}",
+        )
+    if not result.data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Consulta no encontrada.")
+    return {"id": str(consulta_id), "fijada": body.fijada}
+
+
+@router.post("/history/delete")
+async def delete_history(
+    body: HistoryDelete,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Borra consultas del historial del usuario autenticado.
+    Con `ids` borra esas consultas (fijadas o no). Con `todas` borra el
+    historial completo; las fijadas se conservan salvo `incluir_fijadas`.
+    """
+    if not body.todas and not body.ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Indica las consultas a borrar o usa todas=true.",
+        )
+    try:
+        query = (
+            get_supabase_client()
+            .table("consulta")
+            .delete()
+            .eq("id_usuario", current_user["user_id"])
+        )
+        if body.todas:
+            if not body.incluir_fijadas:
+                query = query.eq("fijada", False)
+        else:
+            query = query.in_("id", [str(i) for i in body.ids])
+        result = query.execute()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"No se pudo borrar el historial: {str(e)}",
+        )
+    return {"borradas": len(result.data or [])}
