@@ -2,7 +2,12 @@
    index.css — Estilos globales de la aplicación RAG Institucional
    =================================================================== */
 
-/* ---------- Variables de color (light) ---------- */
+/* ---------- Variables de color ----------
+   Tema claro por defecto. El tema oscuro se aplica si el usuario lo elige
+   (data-theme="dark" en <html>) o si eligió "Sistema" (sin data-theme) y su
+   sistema operativo está en modo oscuro. Ver src/lib/theme.js. */
+
+/* ---------- Tema claro ---------- */
 :root {
   --bg:           #f9fafb;
   --bg-card:      #ffffff;
@@ -31,12 +36,11 @@
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
-/* ---------- Variables de color (dark) ---------- */
-@media (prefers-color-scheme: dark) {
-  :root {
+/* ---------- Tema oscuro: elegido a mano ---------- */
+:root[data-theme="dark"] {
     --bg:           #0f1117;
     --bg-card:      #1a1d27;
     --bg-sidebar:   #1a1d27;
@@ -55,7 +59,41 @@
     --danger-bg:    rgba(248,113,113,.1);
     --nav-bg:       #1a1d27;
     --nav-border:   #2d3148;
+    --shadow-sm:    0 1px 2px rgba(0,0,0,.3);
+    --shadow:       0 4px 12px rgba(0,0,0,.35);
+    color-scheme: dark;
+}
+
+/* ---------- Tema oscuro: "Sistema" con el sistema en modo oscuro ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+      --bg:           #0f1117;
+      --bg-card:      #1a1d27;
+      --bg-sidebar:   #1a1d27;
+      --border:       #2d3148;
+      --text:         #9ca3af;
+      --text-h:       #f3f4f6;
+      --text-muted:   #6b7280;
+      --accent:       #a78bfa;
+      --accent-light: rgba(167,139,250,.15);
+      --accent-hover: #8b5cf6;
+      --success:      #34d399;
+      --success-bg:   rgba(52,211,153,.1);
+      --warning:      #fbbf24;
+      --warning-bg:   rgba(251,191,36,.1);
+      --danger:       #f87171;
+      --danger-bg:    rgba(248,113,113,.1);
+      --nav-bg:       #1a1d27;
+      --nav-border:   #2d3148;
+      --shadow-sm:    0 1px 2px rgba(0,0,0,.3);
+      --shadow:       0 4px 12px rgba(0,0,0,.35);
+      color-scheme: dark;
   }
+}
+
+/* Transición suave al cambiar de tema */
+body, nav, aside, textarea, input, select {
+  transition: background-color .2s ease, border-color .2s ease, color .2s ease;
 }
 
 /* ---------- Reset ---------- */

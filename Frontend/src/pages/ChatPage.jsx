@@ -246,6 +246,9 @@ export default function ChatPage() {
           update((m) => ({ content: m.content + ev.text }));
         } else if (ev.type === "done") {
           update({ streaming: false, tiempoMs: ev.tiempo_ms, tiempos: ev.tiempos, cache: ev.cache });
+          // El backend todavía guarda la consulta antes de cerrar la conexión;
+          // la respuesta ya está completa, así que se libera el chat de una vez
+          setLoading(false);
         } else if (ev.type === "error") {
           throw new Error(ev.detail);
         }
@@ -362,7 +365,7 @@ export default function ChatPage() {
             <div style={styles.avatarAssistant}>
               <Bot size={14} color="var(--accent)" />
             </div>
-            <div style={styles.typingDots}>
+            <div className="typing-dots" style={styles.typingDots}>
               <span /><span /><span />
             </div>
           </div>
@@ -569,6 +572,15 @@ export default function ChatPage() {
           0%, 80%, 100% { opacity: 0; transform: scale(.8); }
           40% { opacity: 1; transform: scale(1); }
         }
+        .typing-dots span {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: var(--text-muted);
+          animation: blink 1.4s infinite both;
+        }
+        .typing-dots span:nth-child(2) { animation-delay: .2s; }
+        .typing-dots span:nth-child(3) { animation-delay: .4s; }
       `}</style>
     </div>
   );
@@ -598,7 +610,7 @@ function MessageBubble({ msg, expanded, onToggleSources }) {
       <div style={styles.assistantContent}>
         {/* Contenido markdown */}
         {msg.streaming && !msg.content ? (
-          <div style={{ ...styles.typingDots, width: "fit-content" }}>
+          <div className="typing-dots" style={{ ...styles.typingDots, width: "fit-content" }}>
             <span /><span /><span />
           </div>
         ) : (

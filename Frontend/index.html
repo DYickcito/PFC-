@@ -1,10 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <title>IA Institucional</title>
+    <script>
+      // Aplica el tema guardado antes de pintar la página, para que no
+      // parpadee en claro cuando el usuario eligió oscuro (ver src/lib/theme.js)
+      try {
+        var tema = localStorage.getItem("tema");
+        if (tema === "light" || tema === "dark") document.documentElement.dataset.theme = tema;
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

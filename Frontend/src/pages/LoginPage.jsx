@@ -8,6 +8,7 @@
 import { useState } from "react";
 import { LogIn, UserPlus, Eye, EyeOff, GraduationCap } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
+import ThemeToggle from "../components/ThemeToggle";
 
 export default function LoginPage() {
   const [mode, setMode] = useState("login"); // "login" | "register"
@@ -90,6 +91,9 @@ export default function LoginPage() {
 
       {/* ── Panel de formulario ── */}
       <div style={styles.formPanel}>
+        <div style={styles.themeCorner}>
+          <ThemeToggle />
+        </div>
         <div style={styles.card}>
           {/* Tabs login / registro */}
           <div style={styles.tabs}>
@@ -305,6 +309,12 @@ const styles = {
     justifyContent: "center",
     padding: "40px 24px",
     background: "var(--bg)",
+    position: "relative",
+  },
+  themeCorner: {
+    position: "absolute",
+    top: 16,
+    right: 16,
   },
   card: {
     width: "100%",

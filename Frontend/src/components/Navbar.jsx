@@ -3,6 +3,7 @@
  *
  * Contiene:
  *  - Tabs "Ingesta" (solo admin) y "Chat"
+ *  - Selector de tema (claro, oscuro o sistema)
  *  - Nombre y email del usuario logueado
  *  - Botón de cerrar sesión
  */
@@ -10,6 +11,7 @@ import { useState, useEffect } from "react";
 import { FileUp, MessageSquare, LogOut, User } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { supabase } from "../lib/supabaseClient";
+import ThemeToggle from "./ThemeToggle";
 
 export default function Navbar({ activeTab, onTabChange }) {
   const { user, signOut } = useAuth();
@@ -64,6 +66,7 @@ export default function Navbar({ activeTab, onTabChange }) {
 
       {/* ── Usuario + logout ── */}
       <div style={styles.userArea}>
+        <ThemeToggle />
         <div style={styles.userInfo}>
           <div style={styles.avatar}>
             <User size={14} />
