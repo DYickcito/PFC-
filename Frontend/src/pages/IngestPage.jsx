@@ -1,6 +1,6 @@
 /**
  * IngestPage.jsx — Vista de carga e indexación de documentos.
- * Solo accesible para administradores (el Navbar ya oculta el tab para otros roles,
+ * Solo accesible para administradores (la barra lateral oculta la sección para otros roles,
  * pero aquí también se verifica).
  *
  * Columna izquierda: formulario de carga (drag & drop + selector de carrera)

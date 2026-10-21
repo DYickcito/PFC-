@@ -111,7 +111,7 @@ La aplicación queda en `http://localhost:5173`.
 
 ## Uso
 
-* **Chat** (todos los roles): preguntas en lenguaje natural. Cada respuesta indica si salió de los documentos o de conocimiento general, las fuentes usadas y el tiempo que tardó; al pasar el mouse por el tiempo se ve cuánto tomó cada etapa. El botón Historial muestra tus consultas anteriores, donde puedes fijar las importantes y borrar las que elijas o todo el historial.
+* **Chat** (todos los roles): preguntas en lenguaje natural. Cada respuesta indica si salió de los documentos o de conocimiento general, las fuentes usadas y el tiempo que tardó; al pasar el mouse por el tiempo se ve cuánto tomó cada etapa. Tus consultas anteriores están en la barra lateral izquierda (se puede plegar), donde puedes fijar las importantes y borrar las que elijas. Abajo está tu perfil, con acceso a la configuración: tema claro, oscuro o del sistema, tamaño del texto, tecla para enviar, fuentes desplegadas, detalles técnicos y borrar todo el historial.
 * **Ingesta** (solo administradores): subir uno o varios documentos a la vez y asignarles carrera y descripción. Desde el historial de documentos se puede editar el nombre, la carrera o la descripción, reemplazar el archivo por una versión nueva, descargarlo o eliminarlo.
 
 ## Endpoints
